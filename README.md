@@ -2,6 +2,8 @@
 
 Creation of synthetic and labeled point cloud data for testing and AI training purposes.
 
+![](/media/generatedData.gif)
+
 ## Setup
 
 ```bash
