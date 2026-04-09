@@ -33,11 +33,11 @@ CFG = {
     "seed":        42,
     "output_dir":  "../output/dataset",
 
-    # ── Sensor noise (FUSION3D: σ flat=6.5mm, overall≈12-15mm) ──
-    "noise_std":        0.010,   # m  Gaussian noise per point
+    # ── Sensor noise (FUSION3D: σ flat=6.5mm, overall≈30mm measured) ──
+    "noise_std":        0.025,   # m  Gaussian noise per point (calibrated to real roughness σ≈30mm)
     "dropout_ratio":    0.15,    # fraction of points removed
     "outlier_ratio":    0.03,    # fraction turned into local outliers
-    "voxel_size":       0.010,   # m  simulates sensor spatial resolution limit
+    "voxel_size":       0.015,   # m  simulates sensor spatial resolution limit (NN spacing ≈55mm real)
     "local_outlier_std": 0.055,  # m  spread of local outlier clusters
 
     # ── Camera positions (matching BBB system: cenital + der + izq) ──
@@ -97,9 +97,17 @@ def make_box_mesh(w: float, h: float, d: float) -> o3d.geometry.TriangleMesh:
 
 
 def make_person_mesh() -> o3d.geometry.TriangleMesh:
-    """Rough person: cylinder body + sphere head, standing at Y=0."""
+    """Rough person: cylinder body + sphere head, standing upright at Y=0.
+    Open3D create_cylinder is Z-aligned by default → rotate 90° around X to make it Y-aligned.
+    """
     body = o3d.geometry.TriangleMesh.create_cylinder(radius=0.18, height=0.95, resolution=16)
-    body.translate([0.0, 0.475, 0.0])   # centre cylinder at Y=0.475
+    # Rotate 90° around X: Z-axis becomes Y-axis → cylinder stands upright
+    R = np.array([[1, 0, 0],
+                  [0, 0, -1],
+                  [0, 1,  0]], dtype=np.float64)
+    body.rotate(R, center=(0.0, 0.0, 0.0))
+    # Now cylinder spans Y=-0.475..+0.475 → translate up so bottom sits on Y=0
+    body.translate([0.0, 0.475, 0.0])
     head = o3d.geometry.TriangleMesh.create_sphere(radius=0.14, resolution=8)
     head.translate([0.0, 1.02, 0.0])
     return body + head
