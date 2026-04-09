@@ -35,9 +35,9 @@ CFG = {
 
     # ── Sensor noise (FUSION3D: σ flat=6.5mm, overall≈12-15mm) ──
     "noise_std":        0.010,   # m  Gaussian noise per point
-    "dropout_ratio":    0.20,    # fraction of points removed
+    "dropout_ratio":    0.15,    # fraction of points removed
     "outlier_ratio":    0.03,    # fraction turned into local outliers
-    "voxel_size":       0.015,   # m  simulates sensor spatial resolution limit
+    "voxel_size":       0.010,   # m  simulates sensor spatial resolution limit
     "local_outlier_std": 0.055,  # m  spread of local outlier clusters
 
     # ── Camera positions (matching BBB system: cenital + der + izq) ──
@@ -60,11 +60,14 @@ CFG = {
     "box_max":  1.40,
 
     # Floor extent (m) — half-size of the sampled floor patch
-    "floor_extent": 3.0,
+    # Real FUSION3D Z span ≈ 3m, X span ≈ 5.5m → floor_extent matches
+    "floor_extent": 2.5,
 
     # Initial points sampled from each mesh before degradation
     # (voxel grid will reduce this to a physically realistic density)
-    "pts_floor":    200_000,
+    # Real FUSION3D: ~270k pts/scene total (incl. walls+ceiling).
+    # Targeting ~120-150k for floor+objects-only synthetic.
+    "pts_floor":    500_000,
     "pts_pallet":    30_000,
     "pts_box":       80_000,
     "pts_forklift": 100_000,
@@ -403,10 +406,14 @@ def generate_scene(
     # ── Person (optional) ──
     if rng.random() < cfg["p_person"]:
         person = make_person_mesh()
-        # Place 1–2 m from cargo, random angle, not behind forklift
-        angle = rng.uniform(0, 2 * np.pi)
-        dist  = rng.uniform(0.8, 2.0)
-        person.translate([dist * np.cos(angle), 0.0, dist * np.sin(angle)])
+        # Place person on the front/lateral side (positive Z or side ±X).
+        # Avoid negative Z (forklift area). Angle limited to front arc: -75° to +75°
+        # so person appears near the cargo, not behind the vehicle.
+        angle = rng.uniform(-np.pi * 5 / 12, np.pi * 5 / 12)   # ±75°
+        dist  = rng.uniform(0.6, 1.5)
+        px = rng.uniform(-0.5, 0.5) + dist * np.sin(angle)
+        pz = rng.uniform(0.3, 0.8) + dist * np.cos(angle)
+        person.translate([px, 0.0, pz])
         pp2, pl2 = sample_labeled(person, LABEL["person"], cfg["pts_person"])
         all_pts.append(pp2); all_lbs.append(pl2)
         meta["objects"].append("person")

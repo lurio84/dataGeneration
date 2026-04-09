@@ -28,15 +28,24 @@ LABEL_COLORS = {0: "#8B7355", 1: "#E67E22", 2: "#2980B9", 3: "#27AE60", 4: "#F39
 # ── Loaders ────────────────────────────────────────────────────────────────────
 
 def load_synth_ply(path: Path) -> tuple[np.ndarray, np.ndarray]:
-    """Return (pts [N,3], labels [N,]) from synthetic PLY (binary, has label property)."""
-    dtype = np.dtype([("x","<f4"),("y","<f4"),("z","<f4"),("label","u1")])
+    """Return (pts [N,3], labels [N,]) from synthetic PLY.
+    Handles both old format (x y z label) and new format (x y z red green blue label).
+    """
     with open(path, "rb") as f:
-        # skip header
+        header_lines = []
         while True:
             line = f.readline()
-            if line.strip() == b"end_header":
+            header_lines.append(line.decode("ascii", errors="ignore").strip())
+            if header_lines[-1] == "end_header":
                 break
-        data = np.frombuffer(f.read(), dtype=dtype)
+        raw = f.read()
+    has_rgb = any("red" in l for l in header_lines)
+    if has_rgb:
+        dtype = np.dtype([("x","<f4"),("y","<f4"),("z","<f4"),
+                          ("red","u1"),("green","u1"),("blue","u1"),("label","u1")])
+    else:
+        dtype = np.dtype([("x","<f4"),("y","<f4"),("z","<f4"),("label","u1")])
+    data = np.frombuffer(raw, dtype=dtype)
     pts = np.column_stack([data["x"], data["y"], data["z"]]).astype(np.float32)
     lbs = data["label"]
     return pts, lbs
