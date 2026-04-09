@@ -1,12 +1,11 @@
 """
 preview_grid.py  —  Visual overview of the synthetic dataset.
 
-Generates a grid PNG with top / front / side thumbnails per scene.
-
 Usage (from src/):
-    python3 preview_grid.py               # 50 random scenes, top-down only
-    python3 preview_grid.py --n 100       # 100 scenes
-    python3 preview_grid.py --views 3     # top + front + side per scene
+    python3 preview_grid.py                      # 50 scenes, one big grid
+    python3 preview_grid.py --views 3            # 3 views per scene
+    python3 preview_grid.py --batch 10           # multiple PNGs, 10 scenes each
+    python3 preview_grid.py --batch 10 --views 3
     python3 preview_grid.py --n 20 --views 3
 """
 
@@ -33,8 +32,8 @@ LABEL_COLORS = {
 }
 LABEL_NAMES = {0:"floor", 1:"cargo", 2:"vehicle", 3:"person", 4:"pallet", 255:"outlier"}
 
-COLS = 5          # scenes per row
-MAX_PTS = 8_000   # subsample per scene for speed
+COLS = 2          # scenes per row (in batch mode; 5 in full-grid mode)
+MAX_PTS = 10_000  # subsample per scene for speed
 
 
 def load_synth(path: Path):
@@ -112,73 +111,83 @@ def legend_patches():
     ]
 
 
-def main():
-    args = sys.argv[1:]
-    n_scenes = 50
-    n_views = 1   # 1=top only, 3=top+front+side
+def render_batch(plys: list, views: list, batch_idx: int, total_batches: int,
+                 cols: int = COLS) -> Path:
+    """Render one batch of scenes → returns saved path."""
+    n_views = len(views)
+    n_cols = cols * n_views
+    n_rows = int(np.ceil(len(plys) / cols))
 
-    for i, a in enumerate(args):
-        if a == "--n" and i+1 < len(args):
-            n_scenes = int(args[i+1])
-        if a == "--views" and i+1 < len(args):
-            n_views = int(args[i+1])
-
-    all_plys = sorted(SYNTH_DIR.glob("*.ply"))
-    if not all_plys:
-        print(f"No PLYs in {SYNTH_DIR}"); sys.exit(1)
-
-    # Random sample (fixed seed for reproducibility)
-    rng = np.random.default_rng(7)
-    chosen = sorted(rng.choice(len(all_plys), min(n_scenes, len(all_plys)), replace=False))
-    plys = [all_plys[i] for i in chosen]
-
-    views = ["top", "front", "side"][:n_views]
-    n_cols = COLS * n_views
-    n_rows = int(np.ceil(len(plys) / COLS))
-
-    cell_w = 2.8 if n_views == 1 else 2.2
-    cell_h = 2.6 if n_views == 1 else 2.2
+    cell_w = 4.0
+    cell_h = 3.8
     fig_w = n_cols * cell_w
-    fig_h = n_rows * cell_h + 0.8   # extra for legend
+    fig_h = n_rows * cell_h + 0.7
 
-    print(f"Building {len(plys)}-scene grid  ({n_rows} rows × {COLS} cols, {n_views} view/scene) …")
-    fig, axes = plt.subplots(n_rows, n_cols,
-                             figsize=(fig_w, fig_h),
-                             squeeze=False)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), squeeze=False)
 
     for scene_i, ply in enumerate(plys):
         pts, lbs = load_synth(ply)
         pts, lbs = subsample(pts, lbs, seed=scene_i)
         title = scene_title(ply, lbs)
 
-        row = scene_i // COLS
-        base_col = (scene_i % COLS) * n_views
+        row = scene_i // cols
+        base_col = (scene_i % cols) * n_views
 
         for v_i, view in enumerate(views):
             ax = axes[row][base_col + v_i]
-            draw_scene(ax, pts, lbs, view=view)
-            if v_i == 0:
-                ax.set_title(title, fontsize=5, pad=2)
-            else:
-                ax.set_title(view, fontsize=5, pad=2)
+            draw_scene(ax, pts, lbs, view=view, point_size=2.0)
+            ax.set_title(f"{title} · {view}" if v_i == 0 else view, fontsize=7, pad=2)
 
-    # Hide unused axes
-    total_used = len(plys) * n_views
-    for ax in axes.flat[total_used:]:
+    for ax in axes.flat[len(plys) * n_views:]:
         ax.set_visible(False)
 
     fig.legend(handles=legend_patches(), loc="lower center", ncol=7,
-               fontsize=8, title="Labels", title_fontsize=9,
+               fontsize=9, title="Labels", title_fontsize=10,
                framealpha=0.9, markerscale=2)
 
-    suffix = f"_n{len(plys)}_v{n_views}"
-    out_name = f"dataset_grid{suffix}.png"
     PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = PREVIEW_DIR / out_name
+    out_path = PREVIEW_DIR / f"batch_{batch_idx:02d}of{total_batches:02d}.png"
+    plt.tight_layout(rect=[0, 0.05, 1, 1], h_pad=0.5, w_pad=0.4)
+    fig.savefig(out_path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
 
-    plt.tight_layout(rect=[0, 0.04, 1, 1], h_pad=0.4, w_pad=0.3)
-    fig.savefig(out_path, dpi=120, bbox_inches="tight")
-    print(f"Saved → {out_path.resolve()}")
+
+def main():
+    args = sys.argv[1:]
+    n_scenes  = 50
+    n_views   = 3
+    batch_sz  = None   # None = single big grid
+
+    for i, a in enumerate(args):
+        if a == "--n"     and i+1 < len(args): n_scenes = int(args[i+1])
+        if a == "--views" and i+1 < len(args): n_views  = int(args[i+1])
+        if a == "--batch" and i+1 < len(args): batch_sz = int(args[i+1])
+
+    all_plys = sorted(SYNTH_DIR.glob("*.ply"))
+    if not all_plys:
+        print(f"No PLYs in {SYNTH_DIR}"); sys.exit(1)
+
+    rng = np.random.default_rng(7)
+    chosen = sorted(rng.choice(len(all_plys), min(n_scenes, len(all_plys)), replace=False))
+    plys = [all_plys[i] for i in chosen]
+    views = ["top", "front", "side"][:n_views]
+
+    if batch_sz is None:
+        # ── single big grid (legacy mode) ──
+        cols = 5
+        total_batches = 1
+        out = render_batch(plys, views, 1, 1, cols=cols)
+        out.rename(PREVIEW_DIR / f"dataset_grid_n{len(plys)}_v{n_views}.png")
+        print(f"Saved → {(PREVIEW_DIR / f'dataset_grid_n{len(plys)}_v{n_views}.png').resolve()}")
+    else:
+        # ── multiple small images ──
+        batches = [plys[i:i+batch_sz] for i in range(0, len(plys), batch_sz)]
+        total = len(batches)
+        print(f"{len(plys)} scenes → {total} images of ≤{batch_sz} scenes each  ({n_views} views/scene)")
+        for b_i, batch in enumerate(batches, 1):
+            out = render_batch(batch, views, b_i, total)
+            print(f"  [{b_i}/{total}] {out.name}  ({len(batch)} scenes)")
 
 
 if __name__ == "__main__":
