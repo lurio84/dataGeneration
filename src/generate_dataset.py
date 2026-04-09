@@ -51,8 +51,8 @@ CFG = {
 
     # ── Scene composition ──
     "p_two_boxes":  0.40,   # probability of a second cargo box
-    "p_person":     0.25,
-    "p_forklift":   0.50,   # uses STL; if False → geometric traspaleta
+    "p_person":     0.00,   # disabled for now
+    "p_forklift":   0.00,   # disabled; always use primitive traspaleta
     "p_pallet":     0.70,   # EUR pallet under cargo
 
     # Cargo box size range (m)
@@ -114,16 +114,23 @@ def make_person_mesh() -> o3d.geometry.TriangleMesh:
 
 
 def make_pallet_jack_mesh() -> o3d.geometry.TriangleMesh:
-    """Simplified traspaleta: body + two fork arms."""
-    # Main body / motor unit (low box at rear)
+    """
+    Simplified traspaleta (pallet jack).
+    Origin = body front face, floor level (Y=0, Z=0).
+    Forks extend in +Z (toward cargo/pallet).
+    Body extends in -Z (operator side).
+
+    Local extents:
+      Body:   X:-0.35..+0.35, Y:0..0.90, Z:-0.40..0
+      Fork L: X:-0.30..-0.15, Y:0..0.08, Z:0..+1.15
+      Fork R: X:+0.15..+0.30, Y:0..0.08, Z:0..+1.15
+    """
     body = o3d.geometry.TriangleMesh.create_box(0.70, 0.90, 0.40)
-    body.translate([-0.35, 0.0, -0.60])   # centred in X, rear in -Z
-    # Left fork arm
+    body.translate([-0.35, 0.0, -0.40])
     fork_l = o3d.geometry.TriangleMesh.create_box(0.15, 0.08, 1.15)
-    fork_l.translate([-0.35, 0.0, -0.20])
-    # Right fork arm
+    fork_l.translate([-0.30, 0.0, 0.0])
     fork_r = o3d.geometry.TriangleMesh.create_box(0.15, 0.08, 1.15)
-    fork_r.translate([ 0.20, 0.0, -0.20])
+    fork_r.translate([ 0.15, 0.0, 0.0])
     return body + fork_l + fork_r
 
 
@@ -345,15 +352,22 @@ def generate_scene(
     """
     Build one synthetic scene and return its metadata dict.
     The PLY file is written to cfg['output_dir']/<scene_id:05d>.ply
+
+    Scene composition: floor + (optional pallet) + cargo box(es) + pallet jack.
+    The pallet jack is always present, its body front face touching the cargo
+    back face, rotated by a random angle ±15° around Y.
+    Floor is kept outside the camera FOV filter so the ground plane is always
+    fully covered (no clipping at the edges).
     """
-    all_pts: list[np.ndarray] = []
-    all_lbs: list[np.ndarray] = []
     meta: dict = {"id": scene_id, "objects": []}
 
-    # ── Floor ──
-    fp, fl = sample_floor(cfg, rng)
-    all_pts.append(fp); all_lbs.append(fl)
+    # ── Floor (sampled separately — no FOV filter applied) ──
+    floor_pts, floor_lbs = sample_floor(cfg, rng)
     meta["objects"].append("floor")
+
+    # ── Object point lists (will be FOV-filtered) ──
+    obj_pts: list[np.ndarray] = []
+    obj_lbs: list[np.ndarray] = []
 
     # ── Pallet ──
     has_pallet = rng.random() < cfg["p_pallet"]
@@ -361,75 +375,70 @@ def generate_scene(
     if has_pallet:
         pm = make_pallet_mesh()
         pp, pl = sample_labeled(pm, LABEL["pallet"], cfg["pts_pallet"])
-        all_pts.append(pp); all_lbs.append(pl)
+        obj_pts.append(pp); obj_lbs.append(pl)
         pallet_top_y = EUR_H
         meta["objects"].append("pallet")
 
     # ── Cargo box 1 (always present) ──
     w1, h1, d1 = rng.uniform(cfg["box_min"], cfg["box_max"], 3).astype(float)
-    # Small random XZ offset so it's not always perfectly centred on pallet
-    ox = rng.uniform(-0.10, 0.10)
-    oz = rng.uniform(-0.10, 0.10)
+    # Small random XZ offset so cargo is not always perfectly centred
+    ox = float(rng.uniform(-0.10, 0.10))
+    oz = float(rng.uniform(-0.10, 0.10))
     bm1 = make_box_mesh(w1, h1, d1)
     bm1.translate([ox, pallet_top_y, oz])
     bp1, bl1 = sample_labeled(bm1, LABEL["cargo"], cfg["pts_box"])
-    all_pts.append(bp1); all_lbs.append(bl1)
+    obj_pts.append(bp1); obj_lbs.append(bl1)
     meta["objects"].append({"box1": {"w": round(w1,3), "h": round(h1,3), "d": round(d1,3)}})
 
     # ── Cargo box 2 (optional) ──
-    box2_top_y = pallet_top_y + h1
     if rng.random() < cfg["p_two_boxes"]:
         w2, h2, d2 = rng.uniform(cfg["box_min"], min(w1, cfg["box_max"]), 3).astype(float)
         placement = rng.choice(["stacked", "adjacent"])
         if placement == "stacked":
             bm2 = make_box_mesh(w2, h2, d2)
-            bm2.translate([ox + rng.uniform(-0.05, 0.05), box2_top_y, oz + rng.uniform(-0.05, 0.05)])
+            bm2.translate([ox + rng.uniform(-0.05, 0.05),
+                           pallet_top_y + h1,
+                           oz + rng.uniform(-0.05, 0.05)])
         else:  # adjacent on pallet / floor
             side = rng.choice([-1, 1])
             bm2 = make_box_mesh(w2, h2, d2)
             bm2.translate([ox + side * (w1 / 2 + w2 / 2 + 0.02), pallet_top_y, oz])
         bp2, bl2 = sample_labeled(bm2, LABEL["cargo"], cfg["pts_box"])
-        all_pts.append(bp2); all_lbs.append(bl2)
-        meta["objects"].append({"box2": {"w": round(w2,3), "h": round(h2,3), "d": round(d2,3), "placement": placement}})
+        obj_pts.append(bp2); obj_lbs.append(bl2)
+        meta["objects"].append({"box2": {"w": round(w2,3), "h": round(h2,3),
+                                          "d": round(d2,3), "placement": placement}})
 
-    # ── Vehicle: forklift (STL) or traspaleta (primitives) ──
-    if rng.random() < cfg["p_forklift"]:
-        if forklift_mesh is not None:
-            # Random small rotation around Y (forklift orientation ±15°)
-            angle = rng.uniform(-np.pi / 12, np.pi / 12)
-            R = o3d.geometry.TriangleMesh.create_coordinate_frame().get_rotation_matrix_from_axis_angle([0, angle, 0])
-            fk = o3d.geometry.TriangleMesh(forklift_mesh)  # shallow copy
-            fk.rotate(R, center=(0, 0, 0))
-            vp, vl = sample_labeled(fk, LABEL["vehicle"], cfg["pts_forklift"])
-            meta["objects"].append("forklift")
-        else:
-            # Traspaleta from primitives
-            tj = make_pallet_jack_mesh()
-            # Place behind pallet (negative Z)
-            tj.translate([rng.uniform(-0.3, 0.3), 0.0, rng.uniform(-1.8, -1.2)])
-            vp, vl = sample_labeled(tj, LABEL["vehicle"], cfg["pts_forklift"] // 3)
-            meta["objects"].append("pallet_jack")
-        all_pts.append(vp); all_lbs.append(vl)
+    # ── Pallet jack (always present) ──
+    # Origin of make_pallet_jack_mesh is at body-front / fork-root (Z=0, Y=0).
+    # Forks extend in +Z (toward cargo), body extends in -Z (operator side).
+    # Strategy:
+    #   1. Rotate jack ±15° around Y at its local origin (body front stays at Z=0).
+    #   2. Translate so body front (Z=0) aligns with cargo back face.
+    #      cargo back Z = oz - d1/2.
+    #   3. Small random X offset so jack is not always perfectly centred on cargo.
+    jack_angle = float(rng.uniform(-np.pi / 12, np.pi / 12))   # ±15°
+    jack_x = ox + float(rng.uniform(-0.15, 0.15))
+    cargo_back_z = oz - d1 / 2
 
-    # ── Person (optional) ──
-    if rng.random() < cfg["p_person"]:
-        person = make_person_mesh()
-        # Place person on the front/lateral side (positive Z or side ±X).
-        # Avoid negative Z (forklift area). Angle limited to front arc: -75° to +75°
-        # so person appears near the cargo, not behind the vehicle.
-        angle = rng.uniform(-np.pi * 5 / 12, np.pi * 5 / 12)   # ±75°
-        dist  = rng.uniform(0.6, 1.5)
-        px = rng.uniform(-0.5, 0.5) + dist * np.sin(angle)
-        pz = rng.uniform(0.3, 0.8) + dist * np.cos(angle)
-        person.translate([px, 0.0, pz])
-        pp2, pl2 = sample_labeled(person, LABEL["person"], cfg["pts_person"])
-        all_pts.append(pp2); all_lbs.append(pl2)
-        meta["objects"].append("person")
+    tj = make_pallet_jack_mesh()
+    cos_a, sin_a = np.cos(jack_angle), np.sin(jack_angle)
+    R_y = np.array([[cos_a, 0.0, sin_a],
+                    [0.0,   1.0, 0.0  ],
+                    [-sin_a,0.0, cos_a]], dtype=np.float64)
+    tj.rotate(R_y, center=(0.0, 0.0, 0.0))   # rotate around body front
+    tj.translate([jack_x, 0.0, cargo_back_z])
+    vp, vl = sample_labeled(tj, LABEL["vehicle"], cfg["pts_forklift"] // 3)
+    obj_pts.append(vp); obj_lbs.append(vl)
+    meta["objects"].append({"pallet_jack": {"angle_deg": round(np.degrees(jack_angle), 1)}})
 
-    # ── Assemble and apply camera visibility filter ──
-    pts_all = np.vstack(all_pts)
-    lbs_all = np.concatenate(all_lbs)
-    pts_all, lbs_all = camera_arc_filter(pts_all, lbs_all, cfg["cameras"])
+    # ── Apply camera FOV filter to objects only ──
+    obj_all = np.vstack(obj_pts)
+    lbs_all_obj = np.concatenate(obj_lbs)
+    obj_all, lbs_all_obj = camera_arc_filter(obj_all, lbs_all_obj, cfg["cameras"])
+
+    # ── Merge floor (unfiltered) + objects (filtered) ──
+    pts_all = np.vstack([floor_pts, obj_all])
+    lbs_all = np.concatenate([floor_lbs, lbs_all_obj])
 
     # ── Distance-dependent density falloff ──
     pts_all, lbs_all = apply_distance_density(pts_all, lbs_all, cfg["cameras"], rng)
