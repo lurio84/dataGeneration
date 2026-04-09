@@ -278,7 +278,7 @@ def degrade_labeled(
 #  The numeric `label` field is also kept for programmatic use.
 
 LABEL_RGB: dict[int, tuple[int, int, int]] = {
-    0:   ( 30,  30,  30),   # floor   — gris muy oscuro (recede en CC)
+    0:   (160, 160, 160),   # floor   — gris medio (visible en CC, distinto de carga)
     1:   (230, 126,  34),   # cargo   — naranja
     2:   ( 41, 128, 185),   # vehicle — azul
     3:   ( 39, 174,  96),   # person  — verde
