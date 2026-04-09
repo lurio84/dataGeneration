@@ -386,9 +386,8 @@ def generate_scene(
     rot90 = int(rng.choice([0, 1, 2, 3]))   # 0°, 90°, 180°, 270°
     if rot90 % 2 == 1:                       # 90° or 270° → swap W and D
         w1, d1 = d1, w1
-    # Small random XZ offset so cargo is not always perfectly centred
-    ox = float(rng.uniform(-0.10, 0.10))
-    oz = float(rng.uniform(-0.10, 0.10))
+    # Cargo centred on pallet/origin — no random offset
+    ox, oz = 0.0, 0.0
     bm1 = make_box_mesh(w1, h1, d1)
     bm1.translate([ox, pallet_top_y, oz])
     bp1, bl1 = sample_labeled(bm1, LABEL["cargo"], cfg["pts_box"])
@@ -422,7 +421,7 @@ def generate_scene(
     #      cargo back Z = oz - d1/2.
     #   3. Small random X offset so jack is not always perfectly centred on cargo.
     jack_angle = 0.0   # jack parallel to floor/axes; cargo rotates instead
-    jack_x = ox + float(rng.uniform(-0.15, 0.15))
+    jack_x = float(rng.uniform(-0.10, 0.10))   # ligero offset X del jack
     cargo_back_z = oz - d1 / 2
 
     tj = make_pallet_jack_mesh()
