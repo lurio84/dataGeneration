@@ -56,6 +56,9 @@ DEFAULTS = {
     "p_pallet":         float(CFG["p_pallet"]),
     "p_two_boxes":      float(CFG["p_two_boxes"]),
     "p_person":         float(CFG["p_person"]),
+    "p_cylinder":       float(CFG["p_cylinder"]),
+    "cyl_r":            (float(CFG["cyl_min_r"]), float(CFG["cyl_max_r"])),
+    "cyl_h":            (float(CFG["cyl_min_h"]), float(CFG["cyl_max_h"])),
     "box_w":            (float(CFG["box_min_w"]), float(CFG["box_max_w"])),
     "box_d":            (float(CFG["box_min_d"]), float(CFG["box_max_d"])),
     "box_h":            (float(CFG["box_min_h"]), float(CFG["box_max_h"])),
@@ -131,6 +134,21 @@ with st.sidebar:
             "Prob. persona", 0.0, 1.0, step=0.05, key="p_person",
             value=DEFAULTS["p_person"],
         )
+        p_cylinder = st.slider(
+            "Prob. cilindro (en vez de caja)", 0.0, 1.0, step=0.05, key="p_cylinder",
+            value=DEFAULTS["p_cylinder"],
+        )
+
+    # ── Dimensiones de cilindro ────────────────────────────────────────────────
+    with st.expander("🛢 Dimensiones de cilindro (m)", expanded=False):
+        cyl_r = st.slider(
+            "Radio (min, max)", 0.10, 0.80, step=0.05, key="cyl_r",
+            value=DEFAULTS["cyl_r"],
+        )
+        cyl_h = st.slider(
+            "Altura Y (min, max)", 0.10, 2.00, step=0.05, key="cyl_h",
+            value=DEFAULTS["cyl_h"],
+        )
 
     # ── Dimensiones de caja ────────────────────────────────────────────────────
     with st.expander("📐 Dimensiones de caja (m)", expanded=True):
@@ -186,6 +204,11 @@ cfg.update({
     "p_two_boxes":       p_two_boxes,
     "p_person":          p_person,
     "p_forklift":        0.0,
+    "p_cylinder":        p_cylinder,
+    "cyl_min_r":         cyl_r[0],
+    "cyl_max_r":         cyl_r[1],
+    "cyl_min_h":         cyl_h[0],
+    "cyl_max_h":         cyl_h[1],
     "box_min_w":         box_w[0],
     "box_max_w":         box_w[1],
     "box_min_d":         box_d[0],

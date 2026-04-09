@@ -21,6 +21,7 @@ from generate_dataset import (
     run_generation,
     generate_scene,
     make_box_mesh,
+    make_cylinder_mesh,
     make_pallet_mesh,
     make_pallet_jack_mesh,
     sample_labeled,
@@ -84,6 +85,7 @@ class TestCFG(unittest.TestCase):
             "n_samples", "seed", "output_dir",
             "noise_std", "dropout_ratio", "outlier_ratio", "voxel_size",
             "p_pallet", "p_two_boxes", "p_person", "p_forklift",
+            "p_cylinder", "cyl_min_r", "cyl_max_r", "cyl_min_h", "cyl_max_h",
             "box_min_w", "box_max_w", "box_min_d", "box_max_d",
             "box_min_h", "box_max_h", "floor_extent_x", "floor_extent_z",
             "cameras", "enable_floor",
@@ -158,6 +160,23 @@ class TestGeometry(unittest.TestCase):
         verts = np.asarray(m.vertices)
         width = verts[:, 0].max() - verts[:, 0].min()
         self.assertAlmostEqual(width, 0.70, places=3)
+
+    def test_cylinder_mesh_upright(self):
+        """Cilindro Y-aligned: base en Y=0, top en Y=h, centrado en XZ."""
+        r, h = 0.25, 0.80
+        m = make_cylinder_mesh(r, h)
+        verts = np.asarray(m.vertices)
+        self.assertAlmostEqual(verts[:, 1].min(), 0.0, places=3)
+        self.assertAlmostEqual(verts[:, 1].max(), h,   places=3)
+        self.assertAlmostEqual(abs(verts[:, 0]).max(), r, delta=0.01)
+        self.assertAlmostEqual(abs(verts[:, 2]).max(), r, delta=0.01)
+
+    def test_cylinder_mesh_radius_range(self):
+        """Radio del cilindro respetado en distintos tamaños."""
+        for r, h in [(0.15, 0.30), (0.40, 1.20)]:
+            m = make_cylinder_mesh(r, h)
+            verts = np.asarray(m.vertices)
+            self.assertAlmostEqual(verts[:, 1].max(), h, places=3)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -251,11 +270,36 @@ class TestSceneComposition(unittest.TestCase):
     def test_cargo_always_present(self):
         meta = self._run()
         for m in meta:
-            has_box = any(
-                isinstance(o, dict) and "box1" in o
+            has_cargo = any(
+                isinstance(o, dict) and ("box1" in o or "cylinder1" in o)
                 for o in m["objects"]
             )
-            self.assertTrue(has_box, "box1 no encontrado en la escena")
+            self.assertTrue(has_cargo, "ni box1 ni cylinder1 encontrado en la escena")
+
+    def test_cylinder_composition(self):
+        """Con p_cylinder=1.0 todas las escenas tienen cylinder1 y ninguna box1."""
+        meta = self._run(p_cylinder=1.0, n_samples=5, seed=3)
+        for m in meta:
+            has_cyl = any(isinstance(o, dict) and "cylinder1" in o for o in m["objects"])
+            has_box = any(isinstance(o, dict) and "box1" in o for o in m["objects"])
+            self.assertTrue(has_cyl,  "cylinder1 no encontrado con p_cylinder=1.0")
+            self.assertFalse(has_box, "box1 presente con p_cylinder=1.0")
+
+    def test_cylinder_dimensions_in_range(self):
+        """Radio y altura del cilindro dentro de los rangos configurados."""
+        min_r, max_r = 0.20, 0.30
+        min_h, max_h = 0.40, 0.70
+        meta = self._run(
+            p_cylinder=1.0, n_samples=10, seed=5,
+            cyl_min_r=min_r, cyl_max_r=max_r,
+            cyl_min_h=min_h, cyl_max_h=max_h,
+        )
+        for m in meta:
+            cyl = next(o["cylinder1"] for o in m["objects"] if isinstance(o, dict) and "cylinder1" in o)
+            self.assertGreaterEqual(cyl["r"], min_r - 1e-6)
+            self.assertLessEqual(cyl["r"],    max_r + 1e-6)
+            self.assertGreaterEqual(cyl["h"], min_h - 1e-6)
+            self.assertLessEqual(cyl["h"],    max_h + 1e-6)
 
     def test_jack_always_present(self):
         meta = self._run()

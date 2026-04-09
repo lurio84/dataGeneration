@@ -43,15 +43,21 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
 
 ## 3. ¿Qué otros primitivos de Open3D tienen sentido?
 
-**Estado: ❓ Pendiente decidir**
+**Estado: 🟡 Parcialmente decidido — cilindro implementado**
 
-- **Ya implementados:** caja (`create_box`), pallet (caja), traspaleta (3 cajas), persona (cilindro + esfera).
-- **Candidatos a añadir:**
-  - Cilindro → bobinas, bidones, depósitos
-  - Cono → señales de advertencia de almacén
-  - Caja irregular (L-shape con dos boxes solapados) → cargas no estándar
-  - Esfera → sin uso claro en logística, descartada en principio
-- **Pendiente:** decidir cuáles se implementan antes del dataset final.
+- **Ya implementados:** caja (`create_box`), pallet (caja), traspaleta (3 cajas), persona (cilindro + esfera), **cilindro de cargo** (`make_cylinder_mesh`).
+- **Decisión basada en análisis de datos reales (2026-04-09):**
+  - Análisis de 6 escenas FUSION3D reales (marzo 2026) confirmó que todos los datos reales son cajas rectangulares (Asp XZ 1.0–1.3, r_std/r_mean 0.23–0.56).
+  - El cilindro añade diversidad sintética de formas no vistas — bobinas industriales, bidones — necesaria para que el clasificador generalice.
+  - El cono (señales de almacén) se descarta: anecdótico, sin caso de uso en las capturas.
+  - L-shape: aplazado — los datos reales no lo requieren aún.
+- **Cilindro implementado (2026-04-09):**
+  - Función `make_cylinder_mesh(r, h)` — Y-aligned, base en Y=0, centrado en XZ.
+  - Parámetro `p_cylinder` (0.0–1.0): probabilidad de cilindro en lugar de caja como carga primaria.
+  - Rangos: radio ∈ [0.15, 0.40] m, altura ∈ [0.30, 1.20] m.
+  - Controlable desde CLI (`--p-cylinder`, `--cyl-min-r`, etc.) y desde la app Streamlit.
+- **Pendiente:**
+  - L-shape (caja irregular): aplazado a iteración posterior.
 
 ---
 

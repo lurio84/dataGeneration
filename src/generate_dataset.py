@@ -69,6 +69,13 @@ CFG = {
     "floor_extent_x": 2.5,   # m  half-size along X  → 5.0m total span
     "floor_extent_z": 2.0,   # m  half-size along Z  → 4.0m total span
 
+    # ── Cylinder cargo (alternative to box) ──
+    "p_cylinder":   0.00,   # probability of cylinder instead of box as primary cargo
+    "cyl_min_r":    0.15,   # m  radius min  (bobina pequeña / bidón)
+    "cyl_max_r":    0.40,   # m  radius max  (bobina grande / depósito)
+    "cyl_min_h":    0.30,   # m  height min
+    "cyl_max_h":    1.20,   # m  height max
+
     # Initial points sampled from each mesh before degradation
     # (voxel grid will reduce this to a physically realistic density)
     # Real FUSION3D: ~275k pts/scene (incl. walls+ceiling).
@@ -99,6 +106,20 @@ def make_box_mesh(w: float, h: float, d: float) -> o3d.geometry.TriangleMesh:
     """Axis-aligned box centred in X and Z, bottom face at Y=0."""
     m = o3d.geometry.TriangleMesh.create_box(w, h, d)
     m.translate([-w / 2, 0.0, -d / 2])
+    return m
+
+
+def make_cylinder_mesh(r: float, h: float) -> o3d.geometry.TriangleMesh:
+    """Upright cylinder centred in XZ, bottom face at Y=0.
+    Open3D create_cylinder is Z-aligned by default → rotate 90° around X to make it Y-aligned.
+    """
+    m = o3d.geometry.TriangleMesh.create_cylinder(radius=r, height=h, resolution=32)
+    R = np.array([[1, 0,  0],
+                  [0, 0, -1],
+                  [0, 1,  0]], dtype=np.float64)
+    m.rotate(R, center=(0.0, 0.0, 0.0))
+    # After rotation cylinder spans Y=-h/2..+h/2 → translate up so bottom sits on Y=0
+    m.translate([0.0, h / 2, 0.0])
     return m
 
 
@@ -390,16 +411,27 @@ def generate_scene(
         pallet_top_y = EUR_H
         meta["objects"].append("pallet")
 
-    # ── Cargo box 1 (always present, axis-aligned) ──
-    w1 = float(rng.uniform(cfg["box_min_w"], cfg["box_max_w"]))
-    d1 = float(rng.uniform(cfg["box_min_d"], cfg["box_max_d"]))
-    h1 = float(rng.uniform(cfg["box_min_h"], cfg["box_max_h"]))
-    # Cargo centred on pallet/origin — no random offset
-    bm1 = make_box_mesh(w1, h1, d1)
-    bm1.translate([0.0, pallet_top_y, 0.0])
-    bp1, bl1 = sample_labeled(bm1, LABEL["cargo"], cfg["pts_box"])
-    obj_pts.append(bp1); obj_lbs.append(bl1)
-    meta["objects"].append({"box1": {"w": round(w1,3), "h": round(h1,3), "d": round(d1,3)}})
+    # ── Primary cargo: cylinder or box ──
+    use_cylinder = rng.random() < cfg.get("p_cylinder", 0.0)
+    if use_cylinder:
+        r1 = float(rng.uniform(cfg["cyl_min_r"], cfg["cyl_max_r"]))
+        h1 = float(rng.uniform(cfg["cyl_min_h"], cfg["cyl_max_h"]))
+        d1 = r1 * 2  # footprint depth for jack placement
+        cm1 = make_cylinder_mesh(r1, h1)
+        cm1.translate([0.0, pallet_top_y, 0.0])
+        cp1, cl1 = sample_labeled(cm1, LABEL["cargo"], cfg["pts_box"])
+        obj_pts.append(cp1); obj_lbs.append(cl1)
+        meta["objects"].append({"cylinder1": {"r": round(r1, 3), "h": round(h1, 3)}})
+    else:
+        w1 = float(rng.uniform(cfg["box_min_w"], cfg["box_max_w"]))
+        d1 = float(rng.uniform(cfg["box_min_d"], cfg["box_max_d"]))
+        h1 = float(rng.uniform(cfg["box_min_h"], cfg["box_max_h"]))
+        # Cargo centred on pallet/origin — no random offset
+        bm1 = make_box_mesh(w1, h1, d1)
+        bm1.translate([0.0, pallet_top_y, 0.0])
+        bp1, bl1 = sample_labeled(bm1, LABEL["cargo"], cfg["pts_box"])
+        obj_pts.append(bp1); obj_lbs.append(bl1)
+        meta["objects"].append({"box1": {"w": round(w1, 3), "h": round(h1, 3), "d": round(d1, 3)}})
 
     # ── Cargo box 2 (optional) ──
     if rng.random() < cfg["p_two_boxes"]:
@@ -425,16 +457,16 @@ def generate_scene(
     # Origin of make_pallet_jack_mesh: body-front / fork-root at (X=0, Y=0, Z=0).
     # Forks extend in +Z (toward cargo/pallet front), body extends in -Z.
     #
-    # Jack front anchor:
-    #   - With pallet: align body front with pallet back face (Z = -EUR_D/2 = -0.40m).
-    #     This avoids the body penetrating the pallet from behind.
-    #     Forks then go from -0.40 → +0.75 m (under the pallet, Y=0..0.08).
-    #   - Without pallet: align body front with cargo back face (Z = -d1/2).
-    #     Forks go under the cargo base — minor artifact, accepted.
+    # Jack front anchor: placed behind the cargo back face with a minimum gap
+    # large enough that Gaussian noise (σ=30mm) from both primitives does not
+    # cause visible interpenetration.  min_gap = 3×noise_std ≈ 0.10 m.
+    # With pallet: also respect the pallet back face (Z = -EUR_D/2 = -0.40m) —
+    # whichever is further back wins so forks always fit under the pallet.
+    MIN_JACK_GAP = 0.10   # m  (> 3 × noise_std=0.030 m)
+    cargo_back_z = -d1 / 2   # back face of primary cargo in Z
+    jack_front_z = cargo_back_z - MIN_JACK_GAP
     if has_pallet:
-        jack_front_z = -EUR_D / 2          # = -0.40 m  (pallet back face)
-    else:
-        jack_front_z = -d1 / 2             # cargo back face
+        jack_front_z = min(jack_front_z, -EUR_D / 2)  # never closer than pallet back
 
     tj = make_pallet_jack_mesh()
     tj.translate([0.0, 0.0, jack_front_z])
@@ -501,6 +533,12 @@ def parse_args(cfg: dict) -> dict:
     p.add_argument("--p-person",     type=float, default=cfg["p_person"],     metavar="P", help="Prob person in scene   (default: %(default)s)")
     p.add_argument("--p-forklift",   type=float, default=cfg["p_forklift"],   metavar="P", help="Prob forklift in scene (default: %(default)s)")
     p.add_argument("--p-pallet",     type=float, default=cfg["p_pallet"],     metavar="P", help="Prob EUR pallet base   (default: %(default)s)")
+    # Cylinder cargo
+    p.add_argument("--p-cylinder",   type=float, default=cfg["p_cylinder"],  metavar="P", help="Prob cylinder instead of box  (default: %(default)s)")
+    p.add_argument("--cyl-min-r",    type=float, default=cfg["cyl_min_r"],   metavar="M", help="Min cylinder radius (default: %(default)s)")
+    p.add_argument("--cyl-max-r",    type=float, default=cfg["cyl_max_r"],   metavar="M", help="Max cylinder radius (default: %(default)s)")
+    p.add_argument("--cyl-min-h",    type=float, default=cfg["cyl_min_h"],   metavar="M", help="Min cylinder height (default: %(default)s)")
+    p.add_argument("--cyl-max-h",    type=float, default=cfg["cyl_max_h"],   metavar="M", help="Max cylinder height (default: %(default)s)")
     # Box dimensions (axis-aligned)
     p.add_argument("--box-min-w",  type=float, default=cfg["box_min_w"], metavar="M", help="Min box X width  (default: %(default)s)")
     p.add_argument("--box-max-w",  type=float, default=cfg["box_max_w"], metavar="M", help="Max box X width  (default: %(default)s)")
@@ -525,6 +563,11 @@ def parse_args(cfg: dict) -> dict:
     cfg["p_person"]       = args.p_person
     cfg["p_forklift"]     = args.p_forklift
     cfg["p_pallet"]       = args.p_pallet
+    cfg["p_cylinder"]     = args.p_cylinder
+    cfg["cyl_min_r"]      = args.cyl_min_r
+    cfg["cyl_max_r"]      = args.cyl_max_r
+    cfg["cyl_min_h"]      = args.cyl_min_h
+    cfg["cyl_max_h"]      = args.cyl_max_h
     cfg["box_min_w"]      = args.box_min_w
     cfg["box_max_w"]      = args.box_max_w
     cfg["box_min_d"]      = args.box_min_d
