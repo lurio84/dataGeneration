@@ -110,6 +110,21 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
 
 ---
 
+## 9. Interfaz Streamlit (app.py)
+
+**Estado: ✅ Implementado (2026-04-09)**
+
+- **Fichero:** `src/app.py`, ejecutar con `streamlit run app.py` desde `src/`
+- **Parámetros controlables desde la UI:**
+  - Dataset: n_samples, seed, output_dir
+  - Composición de escena: enable_floor, floor_extent_x/z, p_pallet, p_two_boxes (⚠️ experimental), p_person
+  - Dimensiones de caja: rangos min/max de w, d, h
+  - Ruido del sensor: noise_std, dropout_ratio, outlier_ratio, voxel_size, local_outlier_std
+- **Funcionalidades:** botón "Restaurar valores por defecto", barra de progreso por escena, vista previa PNG con hover azul + click abre imagen completa en nueva pestaña, visor de metadata.json
+- **Tests:** `src/test_pipeline.py` cubre 33 casos (geometría, PLY, composición, sensor, preview, defaults UI); ejecutar con `python3 -m pytest test_pipeline.py -v`
+
+---
+
 ## 8. Generar dataset final
 
 **Estado: 🟡 Listo para ejecutar — pendiente decidir N escenas y primitivos extra**

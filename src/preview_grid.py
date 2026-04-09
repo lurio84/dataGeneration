@@ -21,11 +21,11 @@ PREVIEW_DIR = Path("../output/previews")
 
 LABEL_COLORS = {
     0:   "#8B7355",   # floor   — marrón
-    1:   "#E67E22",   # cargo   — naranja
-    2:   "#2980B9",   # vehicle — azul
+    1:   "#DC3232",   # cargo   — rojo
+    2:   "#0078FF",   # vehicle — azul vivo
     3:   "#27AE60",   # person  — verde
-    4:   "#F39C12",   # pallet  — amarillo
-    255: "#95A5A6",   # outlier — gris
+    4:   "#FFD200",   # pallet  — amarillo
+    255: "#A0A0A0",   # outlier — gris
 }
 LABEL_NAMES = {0:"floor", 1:"cargo", 2:"vehicle", 3:"person", 4:"pallet", 255:"outlier"}
 

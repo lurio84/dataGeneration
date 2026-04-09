@@ -361,8 +361,8 @@ def generate_scene(
     The PLY file is written to cfg['output_dir']/<scene_id:05d>.ply
 
     Scene composition: floor + (optional pallet) + cargo box(es) + pallet jack.
-    The pallet jack is always present, its body front face touching the cargo
-    back face, rotated by a random angle ±15° around Y.
+    The pallet jack is always present, axis-aligned, its body front face
+    touching the pallet back face (or cargo back face if no pallet).
     Floor is kept outside the camera FOV filter so the ground plane is always
     fully covered (no clipping at the edges).
     """
