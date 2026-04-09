@@ -57,6 +57,39 @@ def load_real_ply(path: Path) -> np.ndarray:
     return np.asarray(pcd.points, dtype=np.float32)
 
 
+def detect_floor_axis(pts: np.ndarray) -> int:
+    """
+    Detect which axis (0=X, 1=Y, 2=Z) is the vertical/height axis.
+    The floor axis has the highest point count near one value (histogram peak).
+    Returns the axis index.
+    In real FUSION3D: floor is at Z≈0 (axis 2).
+    In synthetic: floor is at Y=0 (axis 1).
+    """
+    best_axis, best_peak = 0, 0
+    for ax in range(3):
+        vals = pts[:, ax]
+        hist, _ = np.histogram(vals, bins=100)
+        if hist.max() > best_peak:
+            best_peak = hist.max()
+            best_axis = ax
+    return best_axis
+
+
+def align_real_to_synthetic(pts: np.ndarray) -> np.ndarray:
+    """
+    Reorder real FUSION3D axes so that the floor axis becomes Y (synthetic convention).
+    Real FUSION3D: floor axis = Z (index 2) → swap Y and Z.
+    Returns pts with axes (X, height, depth) = (X, Y, Z) in synthetic convention.
+    """
+    floor_ax = detect_floor_axis(pts)
+    if floor_ax == 1:
+        return pts  # already Y-up
+    # Reorder: make floor_ax → Y (index 1)
+    # For real FUSION3D (floor_ax=2): new order = [0, 2, 1] (X, Z, Y)
+    other_axes = [i for i in range(3) if i != floor_ax]
+    return pts[:, [other_axes[0], floor_ax, other_axes[1]]].copy()
+
+
 def detect_floor_height(pts: np.ndarray, axis: int = 1) -> float:
     """
     Estimate floor coordinate along `axis` using the mode of the histogram
@@ -151,7 +184,10 @@ def main() -> None:
     if not real_plys:
         raise RuntimeError(f"No real PLYs found in {REAL_DIR}.")
     print(f"Loading {len(real_plys)} real scenes …")
-    real_pts_list = [load_real_ply(p) for p in real_plys]
+    # Align real data to synthetic convention: height → Y axis
+    real_pts_list = [align_real_to_synthetic(load_real_ply(p)) for p in real_plys]
+    real_floor_ax = detect_floor_axis(load_real_ply(real_plys[0]))
+    print(f"  Real FUSION3D floor axis: {'XYZ'[real_floor_ax]} → remapped to Y")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Figure 1: Scene overview — point count + extent distributions
@@ -194,7 +230,7 @@ def main() -> None:
     synth_heights = np.concatenate([pts[:, 1] for pts in synth_pts_list])
     synth_heights = synth_heights[synth_heights < 2.5]   # clip ceiling artefacts
 
-    # Real: RANSAC floor detection on first real scene (reference)
+    # Real: after alignment Y is height — RANSAC refines floor offset
     print("  RANSAC floor detection on real data …")
     real_h_all = []
     for rpts in real_pts_list[:4]:  # first 4 to save time
@@ -234,9 +270,7 @@ def main() -> None:
     xr = (-3.5, 3.5); zr = (-3.5, 3.5)
     HS, xeS, zeS = density_map(synth_pts_list, xr, zr)
 
-    # Real: normalise coordinates to match synthetic scale
-    # Real X and Z span ~5-6m; keep as-is, same range
-    real_pts_xz = [p[:, [0, 2]] for p in real_pts_list]
+    # Real: after axis alignment, X and Z are the horizontal plane (same as synthetic)
     HR, xeR, zeR = density_map(real_pts_list, (-3.5, 3.5), (-3.5, 3.5))
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
