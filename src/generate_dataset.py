@@ -50,7 +50,7 @@ CFG = {
     ],
 
     # ── Scene composition ──
-    "p_two_boxes":  0.40,   # probability of a second cargo box
+    "p_two_boxes":  0.00,   # disabled — one box per scene
     "p_person":     0.00,   # disabled for now
     "p_forklift":   0.00,   # disabled; always use primitive traspaleta
     "p_pallet":     0.70,   # EUR pallet under cargo
@@ -278,7 +278,7 @@ def degrade_labeled(
 #  The numeric `label` field is also kept for programmatic use.
 
 LABEL_RGB: dict[int, tuple[int, int, int]] = {
-    0:   ( 90,  90,  90),   # floor   — gris neutro
+    0:   ( 30,  30,  30),   # floor   — gris muy oscuro (recede en CC)
     1:   (230, 126,  34),   # cargo   — naranja
     2:   ( 41, 128, 185),   # vehicle — azul
     3:   ( 39, 174,  96),   # person  — verde

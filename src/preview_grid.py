@@ -80,22 +80,31 @@ def scene_title(path: Path, lbs: np.ndarray) -> str:
     return f"{path.stem}  [{', '.join(present)}]"
 
 
-def draw_scene(ax, pts, lbs, view="top", point_size=1.0):
-    """Draw one thumbnail on ax."""
-    rgba = label_rgba(lbs)
-    if view == "top":      # XZ floor plan
-        ax.scatter(pts[:,0], pts[:,2], c=rgba, s=point_size, linewidths=0)
-        ax.set_xlabel("X", fontsize=5, labelpad=1)
-        ax.set_ylabel("Z", fontsize=5, labelpad=1)
-    elif view == "front":  # XY elevation
-        ax.scatter(pts[:,0], pts[:,1], c=rgba, s=point_size, linewidths=0)
-        ax.set_xlabel("X", fontsize=5, labelpad=1)
-        ax.set_ylabel("Y", fontsize=5, labelpad=1)
-    elif view == "side":   # ZY
-        ax.scatter(pts[:,2], pts[:,1], c=rgba, s=point_size, linewidths=0)
-        ax.set_xlabel("Z", fontsize=5, labelpad=1)
-        ax.set_ylabel("Y", fontsize=5, labelpad=1)
+def draw_scene(ax, pts, lbs, view="top", point_size=2.0):
+    """Draw one thumbnail on ax. Floor rendered faint; objects at full opacity."""
+    floor_mask = lbs == 0
+    obj_mask   = ~floor_mask
 
+    def coords(p, v):
+        if v == "top":   return p[:,0], p[:,2], "X", "Z"
+        if v == "front": return p[:,0], p[:,1], "X", "Y"
+        return p[:,2], p[:,1], "Z", "Y"
+
+    xc, yc, xl, yl = coords(pts, view)
+
+    # Floor: small, low alpha — present but not dominant
+    if floor_mask.any():
+        ax.scatter(xc[floor_mask], yc[floor_mask],
+                   c=[LABEL_COLORS[0]], s=point_size * 0.4, linewidths=0, alpha=0.25)
+
+    # Objects: full size and opacity
+    if obj_mask.any():
+        rgba_obj = label_rgba(lbs[obj_mask], alpha=0.9)
+        ax.scatter(xc[obj_mask], yc[obj_mask],
+                   c=rgba_obj, s=point_size, linewidths=0)
+
+    ax.set_xlabel(xl, fontsize=5, labelpad=1)
+    ax.set_ylabel(yl, fontsize=5, labelpad=1)
     ax.set_aspect("equal")
     ax.tick_params(labelsize=4, pad=1)
     ax.grid(True, lw=0.2, alpha=0.4)
