@@ -1,12 +1,9 @@
 """
-preview_grid.py  —  Visual overview of the synthetic dataset.
+preview_grid.py  —  One PNG per PLY scene (3 views: top / front / side).
 
 Usage (from src/):
-    python3 preview_grid.py                      # 50 scenes, one big grid
-    python3 preview_grid.py --views 3            # 3 views per scene
-    python3 preview_grid.py --batch 10           # multiple PNGs, 10 scenes each
-    python3 preview_grid.py --batch 10 --views 3
-    python3 preview_grid.py --n 20 --views 3
+    python3 preview_grid.py          # all scenes in dataset
+    python3 preview_grid.py --n 20   # first 20 scenes
 """
 
 import sys
@@ -111,83 +108,51 @@ def legend_patches():
     ]
 
 
-def render_batch(plys: list, views: list, batch_idx: int, total_batches: int,
-                 cols: int = COLS) -> Path:
-    """Render one batch of scenes → returns saved path."""
-    n_views = len(views)
-    n_cols = cols * n_views
-    n_rows = int(np.ceil(len(plys) / cols))
+def render_scene(ply: Path, out_path: Path) -> None:
+    """Render one PLY as a 3-view PNG (top / front / side)."""
+    pts, lbs = load_synth(ply)
+    pts, lbs = subsample(pts, lbs)
+    title = scene_title(ply, lbs)
 
-    cell_w = 4.0
-    cell_h = 3.8
-    fig_w = n_cols * cell_w
-    fig_h = n_rows * cell_h + 0.7
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4.5))
+    for ax, view in zip(axes, ["top", "front", "side"]):
+        draw_scene(ax, pts, lbs, view=view, point_size=2.0)
+        ax.set_title(view, fontsize=9)
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), squeeze=False)
-
-    for scene_i, ply in enumerate(plys):
-        pts, lbs = load_synth(ply)
-        pts, lbs = subsample(pts, lbs, seed=scene_i)
-        title = scene_title(ply, lbs)
-
-        row = scene_i // cols
-        base_col = (scene_i % cols) * n_views
-
-        for v_i, view in enumerate(views):
-            ax = axes[row][base_col + v_i]
-            draw_scene(ax, pts, lbs, view=view, point_size=2.0)
-            ax.set_title(f"{title} · {view}" if v_i == 0 else view, fontsize=7, pad=2)
-
-    for ax in axes.flat[len(plys) * n_views:]:
-        ax.set_visible(False)
-
+    fig.suptitle(title, fontsize=10, fontweight="bold")
     fig.legend(handles=legend_patches(), loc="lower center", ncol=7,
-               fontsize=9, title="Labels", title_fontsize=10,
+               fontsize=8, title="Labels", title_fontsize=9,
                framealpha=0.9, markerscale=2)
-
-    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = PREVIEW_DIR / f"batch_{batch_idx:02d}of{total_batches:02d}.png"
-    plt.tight_layout(rect=[0, 0.05, 1, 1], h_pad=0.5, w_pad=0.4)
+    plt.tight_layout(rect=[0, 0.08, 1, 0.97])
     fig.savefig(out_path, dpi=130, bbox_inches="tight")
     plt.close(fig)
-    return out_path
 
 
 def main():
     args = sys.argv[1:]
-    n_scenes  = 50
-    n_views   = 3
-    batch_sz  = None   # None = single big grid
+    n_scenes = None   # None = all
 
     for i, a in enumerate(args):
-        if a == "--n"     and i+1 < len(args): n_scenes = int(args[i+1])
-        if a == "--views" and i+1 < len(args): n_views  = int(args[i+1])
-        if a == "--batch" and i+1 < len(args): batch_sz = int(args[i+1])
+        if a == "--n" and i+1 < len(args):
+            n_scenes = int(args[i+1])
 
     all_plys = sorted(SYNTH_DIR.glob("*.ply"))
     if not all_plys:
         print(f"No PLYs in {SYNTH_DIR}"); sys.exit(1)
 
-    rng = np.random.default_rng(7)
-    chosen = sorted(rng.choice(len(all_plys), min(n_scenes, len(all_plys)), replace=False))
-    plys = [all_plys[i] for i in chosen]
-    views = ["top", "front", "side"][:n_views]
+    plys = all_plys[:n_scenes] if n_scenes else all_plys
+    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
 
-    if batch_sz is None:
-        # ── single big grid (legacy mode) ──
-        cols = 5
-        total_batches = 1
-        out = render_batch(plys, views, 1, 1, cols=cols)
-        out.rename(PREVIEW_DIR / f"dataset_grid_n{len(plys)}_v{n_views}.png")
-        print(f"Saved → {(PREVIEW_DIR / f'dataset_grid_n{len(plys)}_v{n_views}.png').resolve()}")
-    else:
-        # ── multiple small images ──
-        batches = [plys[i:i+batch_sz] for i in range(0, len(plys), batch_sz)]
-        total = len(batches)
-        print(f"{len(plys)} scenes → {total} images of ≤{batch_sz} scenes each  ({n_views} views/scene)")
-        for b_i, batch in enumerate(batches, 1):
-            out = render_batch(batch, views, b_i, total)
-            print(f"  [{b_i}/{total}] {out.name}  ({len(batch)} scenes)")
+    # Remove old batch/grid PNGs
+    for old in PREVIEW_DIR.glob("*.png"):
+        old.unlink()
+
+    print(f"Generating {len(plys)} PNGs → {PREVIEW_DIR.resolve()}")
+    for i, ply in enumerate(plys, 1):
+        out = PREVIEW_DIR / f"{ply.stem}.png"
+        render_scene(ply, out)
+        if i % 10 == 0 or i == len(plys):
+            print(f"  [{i}/{len(plys)}]")
 
 
 if __name__ == "__main__":
