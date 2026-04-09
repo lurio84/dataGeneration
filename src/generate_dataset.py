@@ -361,9 +361,10 @@ def generate_scene(
     """
     meta: dict = {"id": scene_id, "objects": []}
 
-    # ── Floor (sampled separately — no FOV filter applied) ──
-    floor_pts, floor_lbs = sample_floor(cfg, rng)
-    meta["objects"].append("floor")
+    # ── Floor (disabled for now — add back when needed) ──
+    floor_pts = np.empty((0, 3), dtype=np.float32)
+    floor_lbs = np.empty(0, dtype=np.uint8)
+    # meta["objects"].append("floor")
 
     # ── Object point lists (will be FOV-filtered) ──
     obj_pts: list[np.ndarray] = []
