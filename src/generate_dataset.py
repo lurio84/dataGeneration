@@ -381,6 +381,10 @@ def generate_scene(
 
     # ── Cargo box 1 (always present) ──
     w1, h1, d1 = rng.uniform(cfg["box_min"], cfg["box_max"], 3).astype(float)
+    # Cargo rotates in 90° steps around Y — pallet jack and floor stay axis-aligned
+    rot90 = int(rng.choice([0, 1, 2, 3]))   # 0°, 90°, 180°, 270°
+    if rot90 % 2 == 1:                       # 90° or 270° → swap W and D
+        w1, d1 = d1, w1
     # Small random XZ offset so cargo is not always perfectly centred
     ox = float(rng.uniform(-0.10, 0.10))
     oz = float(rng.uniform(-0.10, 0.10))
@@ -388,7 +392,7 @@ def generate_scene(
     bm1.translate([ox, pallet_top_y, oz])
     bp1, bl1 = sample_labeled(bm1, LABEL["cargo"], cfg["pts_box"])
     obj_pts.append(bp1); obj_lbs.append(bl1)
-    meta["objects"].append({"box1": {"w": round(w1,3), "h": round(h1,3), "d": round(d1,3)}})
+    meta["objects"].append({"box1": {"w": round(w1,3), "h": round(h1,3), "d": round(d1,3), "rot90": rot90}})
 
     # ── Cargo box 2 (optional) ──
     if rng.random() < cfg["p_two_boxes"]:
@@ -416,7 +420,7 @@ def generate_scene(
     #   2. Translate so body front (Z=0) aligns with cargo back face.
     #      cargo back Z = oz - d1/2.
     #   3. Small random X offset so jack is not always perfectly centred on cargo.
-    jack_angle = float(rng.uniform(-np.pi / 12, np.pi / 12))   # ±15°
+    jack_angle = 0.0   # jack parallel to floor/axes; cargo rotates instead
     jack_x = ox + float(rng.uniform(-0.15, 0.15))
     cargo_back_z = oz - d1 / 2
 
