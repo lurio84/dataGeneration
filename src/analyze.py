@@ -162,6 +162,57 @@ def nn_distances(pts: np.ndarray, sample: int = 5000) -> np.ndarray:
     return dists.astype(np.float32)
 
 
+def crop_to_roi(
+    pts: np.ndarray,
+    x_range: tuple[float, float] = (-2.5, 2.5),
+    y_range: tuple[float, float] = (-0.15, 2.5),
+    z_range: tuple[float, float] = (-2.0, 2.0),
+) -> np.ndarray:
+    """
+    Restrict real FUSION3D cloud to the same spatial region as the synthetic scenes.
+    Excludes walls, ceiling, far background, and sub-floor noise.
+    Coordinate convention after align_real_to_synthetic: Y = height.
+    Bounds chosen from the observed real-data envelope:
+      X ≈ ±2.8m, Z ≈ ±2.0m, height 0–2.5m.
+    Using ±2.5 / ±2.0 to stay within reliable stereo range.
+    """
+    mask = (
+        (pts[:, 0] >= x_range[0]) & (pts[:, 0] <= x_range[1]) &
+        (pts[:, 1] >= y_range[0]) & (pts[:, 1] <= y_range[1]) &
+        (pts[:, 2] >= z_range[0]) & (pts[:, 2] <= z_range[1])
+    )
+    return pts[mask]
+
+
+def _roughness_band(
+    pts: np.ndarray,
+    height: np.ndarray,
+    y_lo: float = 0.20,
+    y_hi: float = 1.60,
+    cell_m: float = 0.05,
+) -> np.ndarray:
+    """
+    Compute per-cell std-dev of height for points within a specific height band
+    (y_lo ≤ height < y_hi).  Used to compare roughness on cargo surfaces
+    independently from the floor band.
+    Returns array of std values for cells with ≥8 points.
+    """
+    mask = (height >= y_lo) & (height < y_hi)
+    pts_b, h_b = pts[mask], height[mask]
+    if len(pts_b) < 50:
+        return np.array([], dtype=np.float32)
+    xi = np.floor(pts_b[:, 0] / cell_m).astype(np.int32)
+    zi = np.floor(pts_b[:, 2] / cell_m).astype(np.int32)
+    keys = xi.astype(np.int64) * 1_000_000 + zi.astype(np.int64)
+    _, inv = np.unique(keys, return_inverse=True)
+    stds = []
+    for k_idx in range(int(inv.max()) + 1):
+        mask2 = inv == k_idx
+        if mask2.sum() >= 8:
+            stds.append(h_b[mask2].std())
+    return np.array(stds, dtype=np.float32)
+
+
 # ── Main analysis ──────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -189,13 +240,21 @@ def main() -> None:
     real_floor_ax = detect_floor_axis(load_real_ply(real_plys[0]))
     print(f"  Real FUSION3D floor axis: {'XYZ'[real_floor_ax]} → remapped to Y")
 
+    # ── Crop real clouds to ROI matching synthetic extent (fair comparison) ──
+    real_counts_full = [len(p) for p in real_pts_list]               # full count before crop
+    real_pts_full    = real_pts_list                                  # keep full for density maps
+    real_pts_list    = [crop_to_roi(p) for p in real_pts_list]
+    real_counts_roi  = [len(p) for p in real_pts_list]
+    print(f"  After ROI crop: {np.mean(real_counts_roi):.0f} ± {np.std(real_counts_roi):.0f} pts/scene"
+          f"  (was {np.mean(real_counts_full):.0f} full)")
+
     # ─────────────────────────────────────────────────────────────────────────
     # Figure 1: Scene overview — point count + extent distributions
     # ─────────────────────────────────────────────────────────────────────────
     print("Figure 1: point counts and extents …")
 
     synth_counts = [len(p) for p in synth_pts_list]
-    real_counts  = [len(p) for p in real_pts_list]
+    real_counts  = real_counts_roi   # use ROI counts throughout for fair comparison
 
     def bbox_span(pts_list):
         return np.array([(p.max(0) - p.min(0)) for p in pts_list])   # (N,3)
@@ -270,8 +329,8 @@ def main() -> None:
     xr = (-3.5, 3.5); zr = (-3.5, 3.5)
     HS, xeS, zeS = density_map(synth_pts_list, xr, zr)
 
-    # Real: after axis alignment, X and Z are the horizontal plane (same as synthetic)
-    HR, xeR, zeR = density_map(real_pts_list, (-3.5, 3.5), (-3.5, 3.5))
+    # Real: use full cloud (pre-ROI) so the density map shows the complete scene
+    HR, xeR, zeR = density_map(real_pts_full, (-3.5, 3.5), (-3.5, 3.5))
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     fig.suptitle("Top-down (XZ) point density", fontweight="bold")
@@ -293,21 +352,29 @@ def main() -> None:
 
     print("  Computing roughness for synthetic (sample 5 scenes) …")
     synth_rough_list = []
+    synth_rough_cargo_list = []
     for pts in synth_pts_list[:5]:
         h = pts[:, 1]   # Y is height in synthetic (floor at Y=0)
-        r = local_roughness_grid(pts, h)
-        if len(r):
-            synth_rough_list.append(r)
-    synth_rough = np.concatenate(synth_rough_list) if synth_rough_list else np.array([0.0])
+        r_floor = local_roughness_grid(pts, h, floor_band_m=0.06)
+        r_cargo = local_roughness_grid(pts, h, floor_band_m=0.06,
+                                       cell_m=0.05) if False else \
+                  _roughness_band(pts, h, y_lo=0.20, y_hi=1.60)
+        if len(r_floor): synth_rough_list.append(r_floor)
+        if len(r_cargo): synth_rough_cargo_list.append(r_cargo)
+    synth_rough       = np.concatenate(synth_rough_list)       if synth_rough_list       else np.array([0.0])
+    synth_rough_cargo = np.concatenate(synth_rough_cargo_list) if synth_rough_cargo_list else np.array([0.0])
 
-    print("  Computing roughness for real (sample 4 scenes) …")
+    print("  Computing roughness for real (sample 4 scenes, ROI-cropped) …")
     real_rough_list = []
+    real_rough_cargo_list = []
     for pts in real_pts_list[:4]:
         h = floor_relative_height(pts)
-        r = local_roughness_grid(pts, h)
-        if len(r):
-            real_rough_list.append(r)
-    real_rough = np.concatenate(real_rough_list) if real_rough_list else np.array([0.015])
+        r_floor = local_roughness_grid(pts, h, floor_band_m=0.06)
+        r_cargo = _roughness_band(pts, h, y_lo=0.20, y_hi=1.60)
+        if len(r_floor): real_rough_list.append(r_floor)
+        if len(r_cargo): real_rough_cargo_list.append(r_cargo)
+    real_rough       = np.concatenate(real_rough_list)       if real_rough_list       else np.array([0.015])
+    real_rough_cargo = np.concatenate(real_rough_cargo_list) if real_rough_cargo_list else np.array([0.015])
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
     fig.suptitle("Local surface roughness σ  (5cm grid cells, proxy for sensor noise)", fontweight="bold")
@@ -379,12 +446,124 @@ def main() -> None:
     fig.savefig(OUT_DIR / "fig6_label_dist.png", dpi=150)
     plt.close(fig)
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Figure 7: Overlay comparison — NN spacing + roughness on same axes
+    # ─────────────────────────────────────────────────────────────────────────
+    print("Figure 7: overlay comparison (synthetic vs real) …")
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle("Synthetic vs Real FUSION3D — direct overlay", fontweight="bold")
+
+    # NN spacing overlay
+    bins_nn = np.linspace(0, 0.14, 70)
+    axes[0].hist(synth_nn * 1000, bins=bins_nn * 1000, color="#E67E22", alpha=0.6,
+                 density=True, label=f"Synthetic  median={np.median(synth_nn)*1000:.1f}mm")
+    axes[0].hist(real_nn * 1000,  bins=bins_nn * 1000, color="#2980B9", alpha=0.6,
+                 density=True, label=f"Real       median={np.median(real_nn)*1000:.1f}mm")
+    axes[0].axvline(np.median(synth_nn) * 1000, color="#E67E22", lw=2, ls="--")
+    axes[0].axvline(np.median(real_nn)  * 1000, color="#2980B9", lw=2, ls="--")
+    axes[0].set_xlabel("NN distance (mm)"); axes[0].set_ylabel("Density")
+    axes[0].set_title("Nearest-neighbour spacing"); axes[0].legend()
+
+    # Roughness overlay
+    bins_r = np.linspace(0, 0.08, 60)
+    axes[1].hist(synth_rough * 1000, bins=bins_r * 1000, color="#E67E22", alpha=0.6,
+                 density=True, label=f"Synthetic  median={np.median(synth_rough)*1000:.1f}mm")
+    axes[1].hist(real_rough  * 1000, bins=bins_r * 1000, color="#2980B9", alpha=0.6,
+                 density=True, label=f"Real       median={np.median(real_rough)*1000:.1f}mm")
+    axes[1].axvline(np.median(synth_rough) * 1000, color="#E67E22", lw=2, ls="--")
+    axes[1].axvline(np.median(real_rough)  * 1000, color="#2980B9", lw=2, ls="--")
+    axes[1].set_xlabel("σ (mm)"); axes[1].set_ylabel("Density")
+    axes[1].set_title("Local roughness σ (5cm grid)"); axes[1].legend()
+
+    plt.tight_layout()
+    fig.savefig(OUT_DIR / "fig7_overlay.png", dpi=150)
+    plt.close(fig)
+
     # ── Summary ──────────────────────────────────────────────────────────────
-    print("\n─── Summary ─────────────────────────────────────────────────────────")
-    print(f"Synthetic  │ scenes={len(synth_plys)}  pts/scene: {np.mean(synth_counts):.0f} ± {np.std(synth_counts):.0f}")
-    print(f"Real       │ scenes={len(real_plys)}   pts/scene: {np.mean(real_counts):.0f} ± {np.std(real_counts):.0f}")
-    print(f"\nRoughness σ  Synthetic: {np.median(synth_rough)*1000:.1f}mm  │  Real: {np.median(real_rough)*1000:.1f}mm")
-    print(f"NN spacing   Synthetic: {np.median(synth_nn)*1000:.1f}mm     │  Real: {np.median(real_nn)*1000:.1f}mm")
+
+    # Footprint XZ extents
+    synth_all_pts = np.concatenate(synth_pts_list)
+    real_all_pts  = np.concatenate(real_pts_list)
+
+    def xz_extent(pts):
+        return (pts[:, 0].min(), pts[:, 0].max(),
+                pts[:, 2].min(), pts[:, 2].max())
+
+    sxmin, sxmax, szmin, szmax = xz_extent(synth_all_pts)
+    rxmin, rxmax, rzmin, rzmax = xz_extent(real_all_pts)
+
+    # Label percentages
+    total_pts = all_lbs.size
+    label_pct = {
+        LABEL_NAMES.get(int(l), str(l)): 100.0 * c / total_pts
+        for l, c in zip(unique_lbs, counts)
+    }
+
+    print("\n╔══════════════════════════════════════════════════════════════════╗")
+    print("║                     ANALYSIS SUMMARY                            ║")
+    print("╠══════════════════════════════════════════════════════════════════╣")
+    print(f"║ 1. POINT COUNT                                                   ║")
+    print(f"║    Synthetic  {np.mean(synth_counts):>8.0f} ± {np.std(synth_counts):<6.0f} pts/scene ({len(synth_plys)} scenes)   ║")
+    print(f"║    Real full  {np.mean(real_counts_full):>8.0f} ± {np.std(real_counts_full):<6.0f} pts/scene ({len(real_plys)} scenes)    ║")
+    print(f"║    Real ROI   {np.mean(real_counts_roi):>8.0f} ± {np.std(real_counts_roi):<6.0f} pts/scene (cropped)           ║")
+    ratio = np.mean(real_counts_full) / np.mean(synth_counts)
+    print(f"╠══════════════════════════════════════════════════════════════════╣")
+    print(f"║ 2. NN SPACING (point density)                                    ║")
+    print(f"║    Synthetic  median={np.median(synth_nn)*1000:>5.1f}mm  mean={np.mean(synth_nn)*1000:>5.1f}mm            ║")
+    print(f"║    Real       median={np.median(real_nn)*1000:>5.1f}mm  mean={np.mean(real_nn)*1000:>5.1f}mm            ║")
+    nn_ratio = np.median(real_nn) / np.median(synth_nn)
+    print(f"║    Real is {nn_ratio:.1f}x sparser → voxel_size too small               ║")
+    voxel_recommended = 0.010 * nn_ratio
+    print(f"║    Recommended voxel_size ≈ {voxel_recommended*1000:.0f}mm  (currently 10mm)         ║")
+    print(f"╠══════════════════════════════════════════════════════════════════╣")
+    print(f"║ 3. LOCAL ROUGHNESS σ  (ROI-cropped real, 5cm grid cells)         ║")
+    print(f"║    Floor band (|h|<6cm)                                          ║")
+    print(f"║      Synthetic  median={np.median(synth_rough)*1000:>5.1f}mm                           ║")
+    print(f"║      Real       median={np.median(real_rough)*1000:>5.1f}mm  (target ≈ 29mm)          ║")
+    rough_gap = np.median(real_rough)*1000 - np.median(synth_rough)*1000
+    print(f"║      Gap: {rough_gap:+.1f}mm                                             ║")
+    s_cargo_med = np.median(synth_rough_cargo)*1000 if len(synth_rough_cargo) else float("nan")
+    r_cargo_med = np.median(real_rough_cargo)*1000  if len(real_rough_cargo)  else float("nan")
+    print(f"║    Cargo band (20cm–160cm)                                       ║")
+    print(f"║      Synthetic  median={s_cargo_med:>5.1f}mm                           ║")
+    print(f"║      Real       median={r_cargo_med:>5.1f}mm                           ║")
+    cargo_gap = r_cargo_med - s_cargo_med
+    print(f"║      Gap: {cargo_gap:+.1f}mm  (surfaces include box tops/sides)         ║")
+    print(f"╠══════════════════════════════════════════════════════════════════╣")
+    print(f"║ 4. FOOTPRINT XZ  (real = ROI-cropped, synth = full scene)       ║")
+    print(f"║    Synthetic  X:[{sxmin:+.2f}, {sxmax:+.2f}]m  Z:[{szmin:+.2f}, {szmax:+.2f}]m      ║")
+    print(f"║    Real (ROI) X:[{rxmin:+.2f}, {rxmax:+.2f}]m  Z:[{rzmin:+.2f}, {rzmax:+.2f}]m      ║")
+    print(f"║    Synth X-span={sxmax-sxmin:.2f}m  Real X-span={rxmax-rxmin:.2f}m                   ║")
+    print(f"║    Synth Z-span={szmax-szmin:.2f}m  Real Z-span={rzmax-rzmin:.2f}m                   ║")
+    print(f"╠══════════════════════════════════════════════════════════════════╣")
+    print(f"║ 5. LABEL DISTRIBUTION (synthetic)                                ║")
+    for name, pct in sorted(label_pct.items(), key=lambda x: -x[1]):
+        print(f"║    {name:<10s}  {pct:>5.1f}%                                          ║")
+    print(f"╠══════════════════════════════════════════════════════════════════╣")
+    noise_std_cur = 0.030  # keep in sync with generate_dataset.py CFG
+    voxel_cur     = 0.019
+    print(f"║ PARAMETER STATUS  (noise={noise_std_cur*1000:.0f}mm  voxel={voxel_cur*1000:.0f}mm)              ║")
+    if nn_ratio > 1.5:
+        print(f"║  ⚠ NN spacing: real {nn_ratio:.1f}x sparser → increase voxel_size        ║")
+    else:
+        print(f"║  ✓ NN spacing: within 1.5x  ({np.median(synth_nn)*1000:.1f}mm vs {np.median(real_nn)*1000:.1f}mm)        ║")
+    if abs(rough_gap) < 5:
+        print(f"║  ✓ Floor roughness gap < 5mm  ({rough_gap:+.1f}mm)                    ║")
+    elif rough_gap > 0:
+        print(f"║  △ Floor roughness: synth {rough_gap:.1f}mm short → ↑ noise_std        ║")
+    else:
+        print(f"║  △ Floor roughness: synth {-rough_gap:.1f}mm over → ↓ noise_std         ║")
+    if abs(cargo_gap) < 5:
+        print(f"║  ✓ Cargo roughness gap < 5mm  ({cargo_gap:+.1f}mm)                    ║")
+    elif cargo_gap > 0:
+        print(f"║  △ Cargo roughness: synth {cargo_gap:.1f}mm short → ↑ noise_std        ║")
+    else:
+        print(f"║  △ Cargo roughness: synth {-cargo_gap:.1f}mm over → ↓ noise_std         ║")
+    ratio_roi = np.mean(real_counts_roi) / np.mean(synth_counts)
+    print(f"║  ℹ Point count ratio (ROI): {ratio_roi:.1f}x  "
+          f"({np.mean(synth_counts):.0f} vs {np.mean(real_counts_roi):.0f} pts)  ║")
+    print(f"╚══════════════════════════════════════════════════════════════════╝")
     print(f"\nSaved figures → {OUT_DIR.resolve()}")
 
 
