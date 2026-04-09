@@ -49,3 +49,5 @@ Thumbs.db
 *.wmv
 
 venv/
+# Generated output (datasets and previews)
+output/
