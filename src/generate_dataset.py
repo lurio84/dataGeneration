@@ -37,7 +37,7 @@ CFG = {
     "noise_std":        0.025,   # m  Gaussian noise per point (calibrated to real roughness σ≈30mm)
     "dropout_ratio":    0.15,    # fraction of points removed
     "outlier_ratio":    0.03,    # fraction turned into local outliers
-    "voxel_size":       0.015,   # m  simulates sensor spatial resolution limit (NN spacing ≈55mm real)
+    "voxel_size":       0.010,   # m  voxel grid; effective NN spacing driven by noise+dropout
     "local_outlier_std": 0.055,  # m  spread of local outlier clusters
 
     # ── Camera positions (matching BBB system: cenital + der + izq) ──
@@ -65,9 +65,9 @@ CFG = {
 
     # Initial points sampled from each mesh before degradation
     # (voxel grid will reduce this to a physically realistic density)
-    # Real FUSION3D: ~270k pts/scene total (incl. walls+ceiling).
-    # Targeting ~120-150k for floor+objects-only synthetic.
-    "pts_floor":    500_000,
+    # Real FUSION3D: ~275k pts/scene (incl. walls+ceiling).
+    # Targeting ~200-250k for floor+objects-only synthetic.
+    "pts_floor":    800_000,
     "pts_pallet":    30_000,
     "pts_box":       80_000,
     "pts_forklift": 100_000,
@@ -278,12 +278,12 @@ def degrade_labeled(
 #  The numeric `label` field is also kept for programmatic use.
 
 LABEL_RGB: dict[int, tuple[int, int, int]] = {
-    0:   (140, 117,  85),   # floor   — marrón
+    0:   ( 90,  90,  90),   # floor   — gris neutro
     1:   (230, 126,  34),   # cargo   — naranja
     2:   ( 41, 128, 185),   # vehicle — azul
     3:   ( 39, 174,  96),   # person  — verde
     4:   (243, 156,  18),   # pallet  — amarillo
-    255: (149, 165, 166),   # outlier — gris
+    255: (180,  60, 180),   # outlier — magenta
 }
 _DEFAULT_RGB = (255, 0, 255)   # magenta for unknown labels
 
@@ -425,8 +425,12 @@ def generate_scene(
     R_y = np.array([[cos_a, 0.0, sin_a],
                     [0.0,   1.0, 0.0  ],
                     [-sin_a,0.0, cos_a]], dtype=np.float64)
-    tj.rotate(R_y, center=(0.0, 0.0, 0.0))   # rotate around body front
-    tj.translate([jack_x, 0.0, cargo_back_z])
+    tj.rotate(R_y, center=(0.0, 0.0, 0.0))   # rotate around body front (Z=0)
+    # After rotation the body-front corners (at ±0.35 in X) protrude into +Z by
+    # up to 0.35·|sin(angle)|.  Pull the jack back by that amount so no part of
+    # the body penetrates the cargo box.
+    z_clearance = 0.35 * abs(sin_a)
+    tj.translate([jack_x, 0.0, cargo_back_z - z_clearance])
     vp, vl = sample_labeled(tj, LABEL["vehicle"], cfg["pts_forklift"] // 3)
     obj_pts.append(vp); obj_lbs.append(vl)
     meta["objects"].append({"pallet_jack": {"angle_deg": round(np.degrees(jack_angle), 1)}})
