@@ -149,6 +149,11 @@ with st.sidebar:
             "Prob. persona", 0.0, 1.0, step=0.05, key="p_person",
             value=DEFAULTS["p_person"],
         )
+        _person_stl = SRC_DIR.parent / "data" / "person.stl"
+        if _person_stl.exists():
+            st.caption(f"✅ STL encontrado: `{_person_stl.name}` — se usará malla real.")
+        else:
+            st.caption("⚠️ `data/person.stl` no encontrado — se usará fallback cilindro+esfera.")
         p_cylinder = st.slider(
             "Prob. cilindro (en vez de caja)", 0.0, 1.0, step=0.05, key="p_cylinder",
             value=DEFAULTS["p_cylinder"],

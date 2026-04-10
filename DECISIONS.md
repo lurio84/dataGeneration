@@ -160,10 +160,37 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
 
 ## 8. Generar dataset final
 
-**Estado: 🟡 Listo para ejecutar — pendiente decidir N escenas y primitivos extra**
+**Estado: ✅ Dataset v1 generado (2026-04-10) — listo para revisión con Paula**
 
-- Pipeline completo y calibrado. Pendiente antes de lanzar:
-  - Decidir N escenas (mínimo 100, recomendado 500+)
-  - Decidir si añadir primitivos adicionales (sección 3) antes del dataset final
-  - Validación oclusión/reflexiones con Paula (sección 7)
-- Comando: `cd src && python3 generate_dataset.py --n 500 --seed 42`
+- **Dataset v1 (validación):** 100 escenas, seed=42, parámetros calibrados.
+- **Comando ejecutado:**
+  ```
+  cd src && python3 generate_dataset.py \
+    --n 100 --seed 42 \
+    --p-cylinder 0.15 \
+    --p-multi-cargo 0.25 \
+    --p-flat-cargo 0.10
+  ```
+- **Probabilidades de escena activas:**
+  | Parámetro | Valor | Justificación |
+  |---|---|---|
+  | `p_person` | 0.30 | Calibrado (§10) |
+  | `p_multi_cargo` | 0.25 | ~25% escenas con carga doble (stacked/tandem) |
+  | `p_flat_cargo` | 0.10 | ~10% caso difícil near-floor (h≤15cm) |
+  | `p_cylinder` | 0.15 | ~15% cilindros (bobinas/bidones); diversidad sintética |
+- **Resultados analyze.py vs 6 escenas reales:**
+  | Métrica | Sintético | Real FUSION3D | Estado |
+  |---|---|---|---|
+  | NN spacing | 49.9mm | 51.3mm | ✅ (2.7%) |
+  | Floor roughness σ | 26.8mm | 30.0mm | ✅ (gap +3.2mm) |
+  | Footprint X | 5.38m | 5.00m | ✅ |
+  | Footprint Z | 4.46m | 3.97m | ✅ |
+  | Puntos/escena | 64k | 235k ROI | ℹ️ ver §7 |
+- **Distribución de labels:**
+  floor 72.9% · vehicle 9.4% · cargo 8.6% · pallet 5.0% · outlier 2.9% · person 1.3%
+- **Metadatos:** `results/metadata_v1.json` (PLYs excluidos de git por .gitignore).
+- **Previews:** 100 PNG en `output/previews/` (excluidos de git).
+- **Pendiente (dataset definitivo ≥500 escenas):**
+  - Validación oclusión/reflexiones con Paula (§7)
+  - Decidir si añadir techo/paredes para igualar point count real
+  - Comando: `cd src && python3 generate_dataset.py --n 500 --seed 42 --p-cylinder 0.15 --p-multi-cargo 0.25 --p-flat-cargo 0.10`
