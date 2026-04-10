@@ -820,6 +820,106 @@ class TestAppDefaults(unittest.TestCase):
         del sys.modules["app"]
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 9. Persona
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestPerson(unittest.TestCase):
+    """Tests de la clase person (label=3): make_person_mesh y bloque generate_scene."""
+
+    def _run(self, **overrides):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _minimal_cfg(tmp, **overrides)
+            meta = run_generation(cfg)
+            return meta, tmp
+
+    # ── make_person_mesh (fallback: stl_path inexistente) ─────────────────────
+
+    def test_make_person_mesh_fallback_base_at_y0(self):
+        """Fallback: base de la malla en Y≈0."""
+        from generate_dataset import make_person_mesh
+        m = make_person_mesh(height=1.75, stl_path="/nonexistent/person.stl")
+        verts = np.asarray(m.vertices)
+        self.assertAlmostEqual(float(verts[:, 1].min()), 0.0, places=2)
+
+    def test_make_person_mesh_fallback_height(self):
+        """Fallback: altura máxima ≈ height ± 10%."""
+        from generate_dataset import make_person_mesh
+        target = 1.75
+        m = make_person_mesh(height=target, stl_path="/nonexistent/person.stl")
+        verts = np.asarray(m.vertices)
+        self.assertAlmostEqual(float(verts[:, 1].max()), target, delta=target * 0.10)
+
+    def test_make_person_mesh_fallback_various_heights(self):
+        """Fallback: escalado correcto para alturas distintas."""
+        from generate_dataset import make_person_mesh
+        for h in (1.70, 1.75, 1.80):
+            m = make_person_mesh(height=h, stl_path="/nonexistent/person.stl")
+            verts = np.asarray(m.vertices)
+            self.assertAlmostEqual(float(verts[:, 1].min()), 0.0, places=2,
+                                   msg=f"base no en Y=0 con height={h}")
+            self.assertAlmostEqual(float(verts[:, 1].max()), h, delta=h * 0.10,
+                                   msg=f"cima incorrecta con height={h}")
+
+    # ── generate_scene / run_generation ───────────────────────────────────────
+
+    def test_person_never_appears_when_p0(self):
+        """p_person=0.0: ninguna escena contiene persona."""
+        meta, _ = self._run(p_person=0.0, n_samples=10, seed=60)
+        for m in meta:
+            has_person = any(
+                isinstance(o, dict) and "person" in o for o in m["objects"]
+            )
+            self.assertFalse(has_person, "Persona aparece con p_person=0.0")
+
+    def test_person_always_appears_when_p1(self):
+        """p_person=1.0: todas las escenas contienen persona en metadata."""
+        meta, _ = self._run(p_person=1.0, n_samples=5, seed=10)
+        for m in meta:
+            has_person = any(
+                isinstance(o, dict) and "person" in o for o in m["objects"]
+            )
+            self.assertTrue(has_person, "Persona no encontrada con p_person=1.0")
+
+    def test_person_label_points_present(self):
+        """p_person=1.0: label=3 presente en cada PLY."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _minimal_cfg(tmp, p_person=1.0, n_samples=3, seed=20)
+            run_generation(cfg)
+            for ply in sorted(Path(tmp).glob("*.ply")):
+                lbs = _read_ply_labels(ply)
+                self.assertIn(3, lbs, f"{ply.name}: ningún punto con label=3 (person)")
+
+    def test_person_height_in_range(self):
+        """Metadata: height ∈ [1.70, 1.80]."""
+        meta, _ = self._run(p_person=1.0, n_samples=10, seed=30)
+        for m in meta:
+            p = next((o["person"] for o in m["objects"]
+                      if isinstance(o, dict) and "person" in o), None)
+            if p is not None:
+                self.assertGreaterEqual(p["height"], 1.70 - 1e-6)
+                self.assertLessEqual(p["height"],    1.80 + 1e-6)
+
+    def test_person_rotation_in_range(self):
+        """Metadata: rot_deg ∈ [0, 360)."""
+        meta, _ = self._run(p_person=1.0, n_samples=10, seed=40)
+        for m in meta:
+            p = next((o["person"] for o in m["objects"]
+                      if isinstance(o, dict) and "person" in o), None)
+            if p is not None:
+                self.assertGreaterEqual(p["rot_deg"], 0.0)
+                self.assertLess(p["rot_deg"],          360.0)
+
+    def test_person_zone_is_valid(self):
+        """Metadata: zone ∈ {'operator', 'perimeter'}."""
+        meta, _ = self._run(p_person=1.0, n_samples=10, seed=50)
+        for m in meta:
+            p = next((o["person"] for o in m["objects"]
+                      if isinstance(o, dict) and "person" in o), None)
+            if p is not None:
+                self.assertIn(p["zone"], ("operator", "perimeter"))
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

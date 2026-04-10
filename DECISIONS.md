@@ -138,14 +138,22 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
 
 ## 10. Primitivo persona (p_person)
 
-**Estado: ❓ Pendiente decidir — siguiente tarea**
+**Estado: ✅ Decidido e implementado (2026-04-10)**
 
-- **Situación actual:** `make_person_mesh()` existe en `generate_dataset.py` (cilindro cuerpo + esfera cabeza, Y-up), pero `p_person=0.0` la mantiene desactivada. Label=3, color verde (39,174,96).
-- **Pregunta abierta:** ¿primitivo geométrico simple (cilindro+esfera existente) o malla más realista (STL/OBJ)?
-  - **Primitivo simple:** rápido de integrar, ya implementado. Suficiente para clasificador si solo importa la huella de puntos. Menos realista en cuanto a oclusiones y densidad de superficie.
-  - **Malla realista STL/OBJ:** más parecido al dato real, mejores oclusiones, mayor variabilidad de pose. Requiere buscar recurso (GrabCAD, Thingiverse, etc.) y adaptar escala/orientación.
-- **Consideraciones de uso:** la persona aparece al lado del pallet/cargo, no encima. Necesita posición aleatoria en XZ fuera de la huella del pallet. Altura fija ~1.75m, puede tener variación ±5cm.
-- **Pendiente decidir antes de implementar.**
+- **Geometría:** malla STL realista (`data/person.stl`). Si el archivo no existe, fallback automático al cilindro+esfera escalado proporcionalmente a la altura objetivo.
+  - STL criteria: watertight, pose neutral de pie (A-pose o recta, no T-pose), < 50k triángulos, licencia CC0 o CC-BY.
+  - Fuentes candidatas: GrabCAD (`"human figure standing neutral pose STL"`), Sketchfab (filtro CC0, `"human standing neutral pose low-poly"`).
+  - Pre-procesado manual (MeshLab/Blender): escalar a 1.75m Y-up, base en Y=0, centrado en XZ, exportar STL binario en metros.
+- **`p_person`:** 0.30 (30% de escenas). Era 0.00.
+- **Altura:** 1.70–1.80m por escena (`rng.uniform(1.70, 1.80)`).
+- **Rotación Y:** aleatoria 0–360° por escena.
+- **Zonas de placement (con jack siempre presente):**
+  - Zona operario (60% de apariciones, requiere pallet presente): detrás del cuerpo del jack, Z ≈ `jack_back_z − [0.30..0.70]m`, X ∈ (−0.50, +0.50). El operario empuja la traspaleta desde ahí.
+  - Zona perímetro cargo (40%, o fallback si hay colisión): ángulo aleatorio 0-360° alrededor del pallet/cargo, radio = `half_diag + [0.30..0.70]m`.
+- **Collision check:** círculo de huella persona (r=0.30m) vs AABB del jack en XZ. Hasta 20 reintentos por zona.
+- **Metadata:** campo `person` en `objects` con `x`, `z`, `height`, `rot_deg`, `zone` ("operator"/"perimeter"), `stl` ("person.stl"/"fallback").
+- **Label:** 3, color verde (39, 174, 96). Sin cambios al label map ni formato PLY.
+- **Tests:** clase `TestPerson` (8 tests) añadida en `test_pipeline.py` (sección 9).
 
 ---
 

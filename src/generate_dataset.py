@@ -54,7 +54,7 @@ CFG = {
     "p_flat_cargo":  0.00,  # prob. of very flat/low cargo — hard near-floor case
     "flat_min_h":    0.03,  # m  min height in flat-cargo mode (overrides box_min_h / cyl_min_h)
     "flat_max_h":    0.15,  # m  max height in flat-cargo mode
-    "p_person":     0.00,   # disabled for now
+    "p_person":     0.30,   # 30% de escenas tienen persona
     "p_forklift":   0.00,   # disabled; always use primitive traspaleta
     "p_pallet":     1.00,   # EUR pallet always present under cargo
     "enable_floor": True,   # include floor plane points
@@ -270,21 +270,78 @@ def compose_cargo(
     raise ValueError(f"Unknown compose mode: {mode!r}")
 
 
-def make_person_mesh() -> o3d.geometry.TriangleMesh:
-    """Rough person: cylinder body + sphere head, standing upright at Y=0.
-    Open3D create_cylinder is Z-aligned by default → rotate 90° around X to make it Y-aligned.
+def _person_no_collision(
+    px: float, pz: float, pr: float,
+    box_xmin: float, box_xmax: float,
+    box_zmin: float, box_zmax: float,
+) -> bool:
+    """True si el círculo (px, pz, radio=pr) NO solapa con el AABB [xmin..xmax]×[zmin..zmax] en XZ."""
+    nx = float(np.clip(px, box_xmin, box_xmax))
+    nz = float(np.clip(pz, box_zmin, box_zmax))
+    return (px - nx) ** 2 + (pz - nz) ** 2 >= pr * pr
+
+
+def make_person_mesh(
+    height: float = 1.75,
+    y_rotation_deg: float = 0.0,
+    stl_path: "str | Path | None" = None,
+) -> o3d.geometry.TriangleMesh:
+    """Person mesh: intenta cargar data/person.stl; si no existe, usa cilindro+esfera.
+
+    Args:
+        height:         Altura objetivo en metros (base en Y=0, cima en Y≈height).
+        y_rotation_deg: Rotación aleatoria alrededor del eje Y (0-360°).
+        stl_path:       Ruta explícita al STL (tests); None → detecta automáticamente.
+
+    Invariantes de salida:
+        vertices[:,1].min() ≈ 0.0        (base en suelo)
+        vertices[:,1].max() ≈ height      (cima a la altura pedida)
+        centrado en XZ alrededor de X=0, Z=0
     """
-    body = o3d.geometry.TriangleMesh.create_cylinder(radius=0.18, height=0.95, resolution=16)
-    # Rotate 90° around X: Z-axis becomes Y-axis → cylinder stands upright
-    R = np.array([[1, 0, 0],
-                  [0, 0, -1],
-                  [0, 1,  0]], dtype=np.float64)
-    body.rotate(R, center=(0.0, 0.0, 0.0))
-    # Now cylinder spans Y=-0.475..+0.475 → translate up so bottom sits on Y=0
-    body.translate([0.0, 0.475, 0.0])
-    head = o3d.geometry.TriangleMesh.create_sphere(radius=0.14, resolution=8)
-    head.translate([0.0, 1.02, 0.0])
-    return body + head
+    _stl = Path(stl_path) if stl_path is not None else Path(__file__).parent.parent / "data" / "person.stl"
+
+    if _stl.exists():
+        mesh = o3d.io.read_triangle_mesh(str(_stl))
+        if len(mesh.vertices) == 0:
+            raise RuntimeError(f"person.stl cargado vacío: {_stl}")
+        mesh.compute_vertex_normals()
+        # Escalar a altura objetivo (invariante a las unidades del STL)
+        verts = np.asarray(mesh.vertices)
+        current_h = verts[:, 1].max() - verts[:, 1].min()
+        if current_h > 1e-6:
+            mesh.scale(height / current_h, center=(0.0, 0.0, 0.0))
+        # Base en Y=0, centrado en XZ
+        verts = np.asarray(mesh.vertices)
+        cx = (verts[:, 0].max() + verts[:, 0].min()) / 2.0
+        cz = (verts[:, 2].max() + verts[:, 2].min()) / 2.0
+        mesh.translate([-cx, -verts[:, 1].min(), -cz])
+    else:
+        # Fallback: cilindro + esfera, proporcionales a height.
+        # Altura total original: body_h=0.95 + head_r*2=0.28 → ~1.23m si head centrado a body_h+head_r.
+        # Repartimos: 84% cuerpo, 16% cabeza (radio=8%).
+        body_h = height * 0.84
+        head_r = height * 0.08
+        body_r = 0.18
+        body = o3d.geometry.TriangleMesh.create_cylinder(radius=body_r, height=body_h, resolution=16)
+        # Open3D crea el cilindro alineado con Z → rotamos 90° en X para que quede en Y
+        R = np.array([[1, 0, 0],
+                      [0, 0, -1],
+                      [0, 1,  0]], dtype=np.float64)
+        body.rotate(R, center=(0.0, 0.0, 0.0))
+        body.translate([0.0, body_h / 2.0, 0.0])   # base en Y=0
+        head = o3d.geometry.TriangleMesh.create_sphere(radius=head_r, resolution=8)
+        head.translate([0.0, body_h + head_r, 0.0])
+        mesh = body + head
+
+    # Rotación Y aleatoria (orientación de la persona en el plano XZ)
+    a = np.deg2rad(y_rotation_deg)
+    R_y = np.array([
+        [ np.cos(a), 0.0, np.sin(a)],
+        [       0.0, 1.0,       0.0],
+        [-np.sin(a), 0.0, np.cos(a)],
+    ], dtype=np.float64)
+    mesh.rotate(R_y, center=(0.0, 0.0, 0.0))
+    return mesh
 
 
 def make_pallet_jack_mesh() -> o3d.geometry.TriangleMesh:
@@ -623,6 +680,60 @@ def generate_scene(
     vp, vl = sample_labeled(tj, LABEL["vehicle"], cfg["pts_forklift"] // 3)
     obj_pts.append(vp); obj_lbs.append(vl)
     meta["objects"].append({"pallet_jack": {"front_z": round(jack_front_z, 3)}})
+
+    # ── Persona (opcional) ──
+    # Zona operario: detrás del cuerpo del jack (operario empuja desde ahí).
+    # Jack body en mundo: X=[-0.35,+0.35], Z=[jack_front_z-0.40, jack_front_z+1.15].
+    if rng.random() < cfg["p_person"]:
+        PERSON_R = 0.30    # radio huella persona (m)
+        BODY_D   = 0.40    # profundidad cuerpo jack (m)
+        FORK_L   = 1.15    # longitud horquillas jack (m)
+        MAX_TRY  = 20
+        jack_xmin = -0.35
+        jack_xmax = +0.35
+        jack_zmin = jack_front_z - BODY_D   # cara trasera del cuerpo
+        jack_zmax = jack_front_z + FORK_L   # punta de las horquillas
+
+        p_height = float(rng.uniform(1.70, 1.80))
+        p_rot    = float(rng.uniform(0.0, 360.0))
+        px = pz = None
+
+        # 60% zona operario (si hay pallet), 40% perímetro cargo
+        use_operator = has_pallet and (rng.random() < 0.60)
+        if use_operator:
+            for _ in range(MAX_TRY):
+                cx = float(rng.uniform(-0.50, +0.50))
+                cz = float(jack_zmin - rng.uniform(0.30, 0.70))
+                if _person_no_collision(cx, cz, PERSON_R, jack_xmin, jack_xmax, jack_zmin, jack_zmax):
+                    px, pz = cx, cz
+                    break
+
+        if px is None:   # fallback al perímetro si zona operario falló o no aplica
+            half_diag = np.sqrt((EUR_W / 2) ** 2 + (EUR_D / 2) ** 2)
+            for _ in range(MAX_TRY):
+                theta = float(rng.uniform(0.0, 2 * np.pi))
+                r     = half_diag + float(rng.uniform(0.30, 0.70))
+                cx    = float(r * np.cos(theta))
+                cz    = float(r * np.sin(theta))
+                if _person_no_collision(cx, cz, PERSON_R, jack_xmin, jack_xmax, jack_zmin, jack_zmax):
+                    px, pz = cx, cz
+                    break
+
+        if px is not None:
+            _person_stl = Path(__file__).parent.parent / "data" / "person.stl"
+            pm = make_person_mesh(height=p_height, y_rotation_deg=p_rot)
+            pm.translate([px, 0.0, pz])
+            pp, pl = sample_labeled(pm, LABEL["person"], cfg["pts_person"])
+            obj_pts.append(pp)
+            obj_lbs.append(pl)
+            meta["objects"].append({"person": {
+                "x":       round(px, 3),
+                "z":       round(pz, 3),
+                "height":  round(p_height, 3),
+                "rot_deg": round(p_rot, 1),
+                "zone":    "operator" if use_operator else "perimeter",
+                "stl":     "person.stl" if _person_stl.exists() else "fallback",
+            }})
 
     # ── Apply camera FOV filter to objects only ──
     obj_all = np.vstack(obj_pts)
