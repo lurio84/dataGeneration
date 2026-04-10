@@ -73,11 +73,16 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
 
 ## 5. Función para combinar primitivos en casos complejos
 
-**Estado: ❓ Pendiente implementar**
+**Estado: ✅ Implementado (2026-04-10)**
 
-- **Existe parcialmente:** lógica de `box2` con modos `stacked` / `adjacent` (deshabilitada con `p_two_boxes=0.00`).
-- **Objetivo:** función genérica que reciba una lista de primitivos con posición relativa y los combine en una escena — por ejemplo solapar dos cajas, apilar tres, carga irregular.
-- **Casos de uso:** carga compleja, múltiples bultos sobre un palé, cargas asimétricas.
+- **Funciones:** `make_primitive_mesh(spec)`, `sample_cargo_spec(cfg, rng, max_w, max_d, max_h)`, `compose_cargo(specs, mode, pallet_top_y, rng)`
+- **Parámetro:** `p_multi_cargo` (0–1) reemplaza `p_two_boxes`; también `p_flat_cargo`, `flat_min_h`, `flat_max_h`
+- **Modos implementados:**
+  - `stacked`: cargo2 encima del cargo1 en Y. Cargo2 nunca más ancho/profundo que cargo1 (estabilidad). `cargo_back_z` solo de cargo1.
+  - `tandem`: cargo1 y cargo2 centrados juntos sobre el pallet en Z. `oz1 = -(d2+gap)/2`, `oz2 = +(d1+gap)/2`. Restricción: `d1 + 0.02 + d2 ≤ EUR_D=0.80m`. Si no cabe, fallback a stacked automático.
+- **Tipos mezclados:** cualquier combinación caja+caja, caja+cilindro, cilindro+cilindro.
+- **Flat cargo:** `p_flat_cargo` activa modo de carga muy baja (h ≤ flat_max_h), simula casos difíciles cerca del suelo.
+- **Tests:** 70 pytest (todos passing). `test_tandem_cargo_fits_within_pallet` verifica la restricción de pallet.
 
 ---
 
@@ -128,6 +133,19 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
   - Ruido del sensor: noise_std, dropout_ratio, outlier_ratio, voxel_size, local_outlier_std
 - **Funcionalidades:** botón "Restaurar valores por defecto", barra de progreso por escena, vista previa PNG con hover azul + click abre imagen completa en nueva pestaña, visor de metadata.json
 - **Tests:** `src/test_pipeline.py` cubre 33 casos (geometría, PLY, composición, sensor, preview, defaults UI); ejecutar con `python3 -m pytest test_pipeline.py -v`
+
+---
+
+## 10. Primitivo persona (p_person)
+
+**Estado: ❓ Pendiente decidir — siguiente tarea**
+
+- **Situación actual:** `make_person_mesh()` existe en `generate_dataset.py` (cilindro cuerpo + esfera cabeza, Y-up), pero `p_person=0.0` la mantiene desactivada. Label=3, color verde (39,174,96).
+- **Pregunta abierta:** ¿primitivo geométrico simple (cilindro+esfera existente) o malla más realista (STL/OBJ)?
+  - **Primitivo simple:** rápido de integrar, ya implementado. Suficiente para clasificador si solo importa la huella de puntos. Menos realista en cuanto a oclusiones y densidad de superficie.
+  - **Malla realista STL/OBJ:** más parecido al dato real, mejores oclusiones, mayor variabilidad de pose. Requiere buscar recurso (GrabCAD, Thingiverse, etc.) y adaptar escala/orientación.
+- **Consideraciones de uso:** la persona aparece al lado del pallet/cargo, no encima. Necesita posición aleatoria en XZ fuera de la huella del pallet. Altura fija ~1.75m, puede tener variación ±5cm.
+- **Pendiente decidir antes de implementar.**
 
 ---
 

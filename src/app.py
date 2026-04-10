@@ -54,7 +54,10 @@ DEFAULTS = {
     "floor_extent_x":   float(CFG["floor_extent_x"]),
     "floor_extent_z":   float(CFG["floor_extent_z"]),
     "p_pallet":         float(CFG["p_pallet"]),
-    "p_two_boxes":      float(CFG["p_two_boxes"]),
+    "p_multi_cargo":    float(CFG["p_multi_cargo"]),
+    "p_flat_cargo":     float(CFG["p_flat_cargo"]),
+    "flat_min_h":       float(CFG["flat_min_h"]),
+    "flat_max_h":       float(CFG["flat_max_h"]),
     "p_person":         float(CFG["p_person"]),
     "p_cylinder":       float(CFG["p_cylinder"]),
     "cyl_r":            (float(CFG["cyl_min_r"]), float(CFG["cyl_max_r"])),
@@ -126,9 +129,21 @@ with st.sidebar:
             value=DEFAULTS["p_pallet"],
         )
         st.caption("⚠️ Experimental")
-        p_two_boxes = st.slider(
-            "Prob. segunda caja", 0.0, 1.0, step=0.05, key="p_two_boxes",
-            value=DEFAULTS["p_two_boxes"],
+        p_multi_cargo = st.slider(
+            "Prob. cargo múltiple (stacked/tandem)", 0.0, 1.0, step=0.05, key="p_multi_cargo",
+            value=DEFAULTS["p_multi_cargo"],
+        )
+        p_flat_cargo = st.slider(
+            "Prob. cargo plano/bajo (≤flat_max_h)", 0.0, 1.0, step=0.05, key="p_flat_cargo",
+            value=DEFAULTS["p_flat_cargo"],
+        )
+        flat_min_h = st.number_input(
+            "Altura mín. cargo plano (m)", min_value=0.01, max_value=0.15,
+            step=0.01, key="flat_min_h", value=DEFAULTS["flat_min_h"],
+        )
+        flat_max_h = st.number_input(
+            "Altura máx. cargo plano (m)", min_value=0.03, max_value=0.30,
+            step=0.01, key="flat_max_h", value=DEFAULTS["flat_max_h"],
         )
         p_person = st.slider(
             "Prob. persona", 0.0, 1.0, step=0.05, key="p_person",
@@ -201,7 +216,10 @@ cfg.update({
     "floor_extent_x":    floor_extent_x,
     "floor_extent_z":    floor_extent_z,
     "p_pallet":          p_pallet,
-    "p_two_boxes":       p_two_boxes,
+    "p_multi_cargo":     p_multi_cargo,
+    "p_flat_cargo":      p_flat_cargo,
+    "flat_min_h":        flat_min_h,
+    "flat_max_h":        flat_max_h,
     "p_person":          p_person,
     "p_forklift":        0.0,
     "p_cylinder":        p_cylinder,

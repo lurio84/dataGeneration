@@ -24,6 +24,11 @@ from generate_dataset import (
     make_cylinder_mesh,
     make_pallet_mesh,
     make_pallet_jack_mesh,
+    make_primitive_mesh,
+    sample_cargo_spec,
+    compose_cargo,
+    _spec_w,
+    _spec_d,
     sample_labeled,
     degrade_labeled,
     camera_arc_filter,
@@ -50,7 +55,7 @@ def _minimal_cfg(tmp_dir: str, **overrides) -> dict:
         "pts_person":     500,
         "enable_floor":   True,
         "p_pallet":       1.0,
-        "p_two_boxes":    0.0,
+        "p_multi_cargo":  0.0,
         "p_person":       0.0,
         "p_forklift":     0.0,
     })
@@ -84,7 +89,8 @@ class TestCFG(unittest.TestCase):
         required = [
             "n_samples", "seed", "output_dir",
             "noise_std", "dropout_ratio", "outlier_ratio", "voxel_size",
-            "p_pallet", "p_two_boxes", "p_person", "p_forklift",
+            "p_pallet", "p_multi_cargo", "p_flat_cargo", "flat_min_h", "flat_max_h",
+            "p_person", "p_forklift",
             "p_cylinder", "cyl_min_r", "cyl_max_r", "cyl_min_h", "cyl_max_h",
             "box_min_w", "box_max_w", "box_min_d", "box_max_d",
             "box_min_h", "box_max_h", "floor_extent_x", "floor_extent_z",
@@ -105,7 +111,7 @@ class TestCFG(unittest.TestCase):
                              "Caja puede ser más profunda que el pallet EUR")
 
     def test_probabilities_in_range(self):
-        for k in ("p_pallet", "p_two_boxes", "p_person", "p_forklift"):
+        for k in ("p_pallet", "p_multi_cargo", "p_flat_cargo", "p_person", "p_forklift"):
             self.assertGreaterEqual(CFG[k], 0.0)
             self.assertLessEqual(CFG[k], 1.0)
 
@@ -271,19 +277,20 @@ class TestSceneComposition(unittest.TestCase):
         meta = self._run()
         for m in meta:
             has_cargo = any(
-                isinstance(o, dict) and ("box1" in o or "cylinder1" in o)
+                isinstance(o, dict) and "cargo1" in o
                 for o in m["objects"]
             )
-            self.assertTrue(has_cargo, "ni box1 ni cylinder1 encontrado en la escena")
+            self.assertTrue(has_cargo, "cargo1 no encontrado en la escena")
 
     def test_cylinder_composition(self):
-        """Con p_cylinder=1.0 todas las escenas tienen cylinder1 y ninguna box1."""
+        """Con p_cylinder=1.0 todas las escenas tienen cargo1 con type=cylinder."""
         meta = self._run(p_cylinder=1.0, n_samples=5, seed=3)
         for m in meta:
-            has_cyl = any(isinstance(o, dict) and "cylinder1" in o for o in m["objects"])
-            has_box = any(isinstance(o, dict) and "box1" in o for o in m["objects"])
-            self.assertTrue(has_cyl,  "cylinder1 no encontrado con p_cylinder=1.0")
-            self.assertFalse(has_box, "box1 presente con p_cylinder=1.0")
+            cargo1 = next((o["cargo1"] for o in m["objects"]
+                           if isinstance(o, dict) and "cargo1" in o), None)
+            self.assertIsNotNone(cargo1, "cargo1 no encontrado con p_cylinder=1.0")
+            self.assertEqual(cargo1["type"], "cylinder",
+                             "cargo1 no es cylinder con p_cylinder=1.0")
 
     def test_cylinder_dimensions_in_range(self):
         """Radio y altura del cilindro dentro de los rangos configurados."""
@@ -295,7 +302,8 @@ class TestSceneComposition(unittest.TestCase):
             cyl_min_h=min_h, cyl_max_h=max_h,
         )
         for m in meta:
-            cyl = next(o["cylinder1"] for o in m["objects"] if isinstance(o, dict) and "cylinder1" in o)
+            cyl = next(o["cargo1"] for o in m["objects"]
+                       if isinstance(o, dict) and "cargo1" in o)
             self.assertGreaterEqual(cyl["r"], min_r - 1e-6)
             self.assertLessEqual(cyl["r"],    max_r + 1e-6)
             self.assertGreaterEqual(cyl["h"], min_h - 1e-6)
@@ -310,15 +318,74 @@ class TestSceneComposition(unittest.TestCase):
             )
             self.assertTrue(has_jack, "pallet_jack no encontrado en la escena")
 
-    def test_two_boxes_activated(self):
-        """Con p_two_boxes=1.0 todas las escenas deben tener box2."""
-        meta = self._run(p_two_boxes=1.0, n_samples=5, seed=7)
+    def test_multi_cargo_activated(self):
+        """Con p_multi_cargo=1.0 todas las escenas deben tener cargo1 y cargo2."""
+        meta = self._run(p_multi_cargo=1.0, n_samples=5, seed=7)
         for m in meta:
-            has_box2 = any(
-                isinstance(o, dict) and "box2" in o
+            has_cargo2 = any(
+                isinstance(o, dict) and "cargo2" in o
                 for o in m["objects"]
             )
-            self.assertTrue(has_box2, "box2 no encontrado con p_two_boxes=1.0")
+            self.assertTrue(has_cargo2, "cargo2 no encontrado con p_multi_cargo=1.0")
+
+    def test_multi_cargo_placement_key(self):
+        """cargo2 debe incluir clave 'placement' (stacked o tandem)."""
+        meta = self._run(p_multi_cargo=1.0, n_samples=10, seed=11)
+        for m in meta:
+            c2 = next((o["cargo2"] for o in m["objects"]
+                       if isinstance(o, dict) and "cargo2" in o), None)
+            if c2 is not None:
+                self.assertIn("placement", c2,
+                              "cargo2 no tiene clave 'placement'")
+                self.assertIn(c2["placement"], ("stacked", "tandem"))
+
+    def test_flat_cargo_height_limited(self):
+        """Con p_flat_cargo=1.0, cargo1 siempre tiene h ≤ flat_max_h."""
+        flat_max = 0.12
+        meta = self._run(p_flat_cargo=1.0, flat_max_h=flat_max,
+                         p_cylinder=0.0, n_samples=15, seed=99)
+        for m in meta:
+            c1 = next(o["cargo1"] for o in m["objects"]
+                      if isinstance(o, dict) and "cargo1" in o)
+            self.assertLessEqual(c1["h"], flat_max + 1e-6,
+                                 f"Cargo plano supera flat_max_h={flat_max}: h={c1['h']}")
+
+    def test_flat_cargo_cfg_keys_present(self):
+        """CFG debe tener p_flat_cargo, flat_min_h y flat_max_h."""
+        for k in ("p_flat_cargo", "flat_min_h", "flat_max_h"):
+            self.assertIn(k, CFG, f"Falta '{k}' en CFG")
+        self.assertGreaterEqual(CFG["p_flat_cargo"], 0.0)
+        self.assertLessEqual(CFG["p_flat_cargo"], 1.0)
+        self.assertGreater(CFG["flat_min_h"], 0.0)
+        self.assertGreater(CFG["flat_max_h"], CFG["flat_min_h"])
+
+    def test_tandem_cargo_fits_within_pallet(self):
+        """En modo tandem, el ensemble (d1+gap+d2) no supera EUR_D=0.80m."""
+        meta = self._run(p_multi_cargo=1.0, n_samples=30, seed=77)
+        EUR_D = 0.80
+        for m in meta:
+            c1_obj = next((o["cargo1"] for o in m["objects"]
+                           if isinstance(o, dict) and "cargo1" in o), None)
+            c2_obj = next((o["cargo2"] for o in m["objects"]
+                           if isinstance(o, dict) and "cargo2" in o), None)
+            if c2_obj is None or c2_obj.get("placement") != "tandem":
+                continue
+            d1 = c1_obj.get("d", c1_obj.get("r", 0.0) * 2)
+            d2 = c2_obj.get("d", c2_obj.get("r", 0.0) * 2)
+            gap = 0.02
+            total = d1 + gap + d2
+            self.assertLessEqual(total, EUR_D + 1e-4,
+                                 f"Tandem ensemble ({total:.3f}m) supera EUR_D ({EUR_D}m)")
+
+    def test_multi_cargo_labels_are_cargo(self):
+        """Todos los puntos de cargo1 y cargo2 deben tener label=1."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _minimal_cfg(tmp, n_samples=5, seed=42, p_multi_cargo=1.0)
+            run_generation(cfg)
+            for ply in Path(tmp).glob("*.ply"):
+                lbs = _read_ply_labels(ply)
+                # Label 1 (cargo) debe existir
+                self.assertIn(1, lbs, f"{ply.name}: ningún punto con label=cargo")
 
     def test_box_dimensions_within_range(self):
         """Dimensiones de caja dentro de los rangos configurados."""
@@ -332,7 +399,8 @@ class TestSceneComposition(unittest.TestCase):
             box_min_h=min_h, box_max_h=max_h,
         )
         for m in meta:
-            box = next(o["box1"] for o in m["objects"] if isinstance(o, dict) and "box1" in o)
+            box = next(o["cargo1"] for o in m["objects"]
+                       if isinstance(o, dict) and "cargo1" in o)
             self.assertGreaterEqual(box["w"], min_w - 1e-6)
             self.assertLessEqual(box["w"],    max_w + 1e-6)
             self.assertGreaterEqual(box["d"], min_d - 1e-6)
@@ -361,14 +429,262 @@ class TestSceneComposition(unittest.TestCase):
             obj_types_a = [o for o in a["objects"] if isinstance(o, str)]
             obj_types_b = [o for o in b["objects"] if isinstance(o, str)]
             self.assertEqual(obj_types_a, obj_types_b)
-            # Mismas claves de dicts de objetos (box1, box2, etc.)
+            # Mismas claves de dicts de objetos (cargo1, cargo2, etc.)
             dict_keys_a = [list(o.keys())[0] for o in a["objects"] if isinstance(o, dict)]
             dict_keys_b = [list(o.keys())[0] for o in b["objects"] if isinstance(o, dict)]
             self.assertEqual(dict_keys_a, dict_keys_b)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 5. Degradación del sensor
+# 5. compose_cargo / sample_cargo_spec / make_primitive_mesh
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestComposeCargo(unittest.TestCase):
+
+    def _rng(self, seed=0):
+        return np.random.default_rng(seed)
+
+    # ── make_primitive_mesh ──
+
+    def test_primitive_mesh_box_aabb(self):
+        """make_primitive_mesh(box) produce mesh con AABB correcto."""
+        spec = {"type": "box", "w": 0.6, "h": 0.8, "d": 0.4}
+        mesh = make_primitive_mesh(spec)
+        v = np.asarray(mesh.vertices)
+        self.assertAlmostEqual(v[:, 0].min(), -0.3, places=4)
+        self.assertAlmostEqual(v[:, 0].max(),  0.3, places=4)
+        self.assertAlmostEqual(v[:, 1].min(),  0.0, places=4)
+        self.assertAlmostEqual(v[:, 1].max(),  0.8, places=3)
+
+    def test_primitive_mesh_cylinder_aabb(self):
+        """make_primitive_mesh(cylinder) produce mesh Y-aligned."""
+        spec = {"type": "cylinder", "r": 0.25, "h": 0.70}
+        mesh = make_primitive_mesh(spec)
+        v = np.asarray(mesh.vertices)
+        self.assertAlmostEqual(v[:, 1].min(), 0.0, places=3)
+        self.assertAlmostEqual(v[:, 1].max(), 0.70, places=3)
+
+    def test_primitive_mesh_unknown_raises(self):
+        with self.assertRaises(ValueError):
+            make_primitive_mesh({"type": "cone", "r": 0.1, "h": 0.5})
+
+    # ── _spec_w / _spec_d ──
+
+    def test_spec_w_box(self):
+        self.assertAlmostEqual(_spec_w({"type": "box", "w": 0.5, "h": 0.8, "d": 0.4}), 0.5)
+
+    def test_spec_w_cylinder(self):
+        self.assertAlmostEqual(_spec_w({"type": "cylinder", "r": 0.20, "h": 0.6}), 0.40)
+
+    def test_spec_d_box(self):
+        self.assertAlmostEqual(_spec_d({"type": "box", "w": 0.5, "h": 0.8, "d": 0.35}), 0.35)
+
+    def test_spec_d_cylinder(self):
+        self.assertAlmostEqual(_spec_d({"type": "cylinder", "r": 0.15, "h": 0.6}), 0.30)
+
+    # ── sample_cargo_spec ──
+
+    def test_sample_cargo_spec_box(self):
+        cfg = CFG.copy()
+        cfg["p_cylinder"] = 0.0
+        spec = sample_cargo_spec(cfg, self._rng())
+        self.assertEqual(spec["type"], "box")
+        self.assertIn("w", spec)
+        self.assertIn("d", spec)
+        self.assertIn("h", spec)
+
+    def test_sample_cargo_spec_cylinder(self):
+        cfg = CFG.copy()
+        cfg["p_cylinder"] = 1.0
+        spec = sample_cargo_spec(cfg, self._rng())
+        self.assertEqual(spec["type"], "cylinder")
+        self.assertIn("r", spec)
+        self.assertIn("h", spec)
+
+    def test_sample_cargo_spec_max_w_clamp(self):
+        """Con max_w, la caja no supera ese ancho."""
+        cfg = CFG.copy()
+        cfg["p_cylinder"] = 0.0
+        cfg["box_min_w"] = 0.30
+        cfg["box_max_w"] = 1.00
+        max_w = 0.45
+        for seed in range(20):
+            spec = sample_cargo_spec(cfg, self._rng(seed), max_w=max_w)
+            self.assertLessEqual(spec["w"], max_w + 1e-9)
+
+    def test_sample_cargo_spec_cylinder_max_w_clamp(self):
+        """Cilindro como cargo2 stacked: radio ≤ min(max_w, max_d)/2."""
+        cfg = CFG.copy()
+        cfg["p_cylinder"] = 1.0
+        cfg["cyl_min_r"] = 0.15
+        cfg["cyl_max_r"] = 0.40
+        max_w, max_d = 0.50, 0.40  # min(max_w, max_d)/2 = 0.20
+        expected_r_max = min(max_w, max_d) / 2  # 0.20
+        for seed in range(20):
+            spec = sample_cargo_spec(cfg, self._rng(seed), max_w=max_w, max_d=max_d)
+            self.assertLessEqual(spec["r"], expected_r_max + 1e-9,
+                                 f"Cilindro r={spec['r']:.4f} supera max_r={expected_r_max}")
+
+    def test_stacked_secondary_never_wider_than_primary(self):
+        """En stacked, cargo2 footprint (w y d) ≤ cargo1 footprint — sea caja o cilindro."""
+        cfg = CFG.copy()
+        cfg["p_cylinder"] = 0.5
+        for seed in range(30):
+            rng = self._rng(seed)
+            spec1 = sample_cargo_spec(cfg, rng)
+            max_w2, max_d2 = _spec_w(spec1), _spec_d(spec1)
+            spec2 = sample_cargo_spec(cfg, rng, max_w=max_w2, max_d=max_d2)
+            self.assertLessEqual(_spec_w(spec2), max_w2 + 1e-9,
+                                 f"seed={seed}: spec2 width {_spec_w(spec2):.3f} > spec1 width {max_w2:.3f}")
+            self.assertLessEqual(_spec_d(spec2), max_d2 + 1e-9,
+                                 f"seed={seed}: spec2 depth {_spec_d(spec2):.3f} > spec1 depth {max_d2:.3f}")
+
+    # ── compose_cargo — single ──
+
+    def test_compose_single_positions_at_pallet_top(self):
+        spec = {"type": "box", "w": 0.5, "h": 0.8, "d": 0.4}
+        items, back_z = compose_cargo([spec], None, 0.144, self._rng())
+        self.assertEqual(len(items), 1)
+        _, placed = items[0]
+        self.assertAlmostEqual(placed["oy"], 0.144, places=3)
+
+    def test_compose_single_cargo_back_z(self):
+        spec = {"type": "box", "w": 0.5, "h": 0.8, "d": 0.40}
+        _, back_z = compose_cargo([spec], None, 0.0, self._rng())
+        self.assertAlmostEqual(back_z, -0.20, places=4)
+
+    # ── compose_cargo — stacked ──
+
+    def test_compose_stacked_returns_two_items(self):
+        s1 = {"type": "box", "w": 0.6, "h": 0.5, "d": 0.5}
+        s2 = {"type": "box", "w": 0.4, "h": 0.4, "d": 0.4}
+        items, _ = compose_cargo([s1, s2], "stacked", 0.144, self._rng())
+        self.assertEqual(len(items), 2)
+
+    def test_compose_stacked_second_on_top(self):
+        """cargo2 debe estar por encima del top de cargo1."""
+        s1 = {"type": "box", "w": 0.6, "h": 0.5, "d": 0.5}
+        s2 = {"type": "box", "w": 0.4, "h": 0.3, "d": 0.4}
+        items, _ = compose_cargo([s1, s2], "stacked", 0.144, self._rng())
+        _, p1 = items[0]
+        _, p2 = items[1]
+        self.assertAlmostEqual(p2["oy"], p1["oy"] + s1["h"], places=3)
+
+    def test_compose_stacked_placement_key(self):
+        s1 = {"type": "box", "w": 0.6, "h": 0.5, "d": 0.5}
+        s2 = {"type": "cylinder", "r": 0.20, "h": 0.3}
+        items, _ = compose_cargo([s1, s2], "stacked", 0.0, self._rng())
+        _, p2 = items[1]
+        self.assertEqual(p2["placement"], "stacked")
+
+    def test_compose_stacked_back_z_from_base_only(self):
+        """Stacked: cargo_back_z usa solo la base, no el item superior."""
+        s1 = {"type": "box", "w": 0.6, "h": 0.5, "d": 0.40}
+        # s2 más ancho en Z que s1 — no debe afectar cargo_back_z
+        s2 = {"type": "box", "w": 0.4, "h": 0.3, "d": 0.70}
+        _, back_z = compose_cargo([s1, s2], "stacked", 0.0, self._rng())
+        self.assertAlmostEqual(back_z, -s1["d"] / 2, places=4)
+
+    # ── compose_cargo — tandem (Z direction) ──
+
+    def test_compose_tandem_returns_two_items(self):
+        s1 = {"type": "box", "w": 0.5, "h": 0.6, "d": 0.4}
+        s2 = {"type": "cylinder", "r": 0.20, "h": 0.5}
+        items, _ = compose_cargo([s1, s2], "tandem", 0.144, self._rng())
+        self.assertEqual(len(items), 2)
+
+    def test_compose_tandem_same_y_level(self):
+        """Tandem: ambos items en el mismo nivel Y."""
+        s1 = {"type": "box", "w": 0.5, "h": 0.6, "d": 0.4}
+        s2 = {"type": "box", "w": 0.4, "h": 0.5, "d": 0.35}
+        items, _ = compose_cargo([s1, s2], "tandem", 0.144, self._rng())
+        _, p1 = items[0]
+        _, p2 = items[1]
+        self.assertAlmostEqual(p1["oy"], p2["oy"], places=4)
+
+    def test_compose_tandem_no_x_offset(self):
+        """Tandem: ningún item desplazado en X (ambos centrados)."""
+        s1 = {"type": "box", "w": 0.5, "h": 0.6, "d": 0.4}
+        s2 = {"type": "box", "w": 0.4, "h": 0.5, "d": 0.35}
+        for seed in range(10):
+            items, _ = compose_cargo([s1, s2], "tandem", 0.0, self._rng(seed))
+            _, p1 = items[0]
+            _, p2 = items[1]
+            self.assertAlmostEqual(p1["ox"], 0.0, places=6)
+            self.assertAlmostEqual(p2["ox"], 0.0, places=6)
+
+    def test_compose_tandem_no_overlap_in_z(self):
+        """Tandem: items no se solapan en Z (gap ≥ 0.02m entre caras)."""
+        s1 = {"type": "box", "w": 0.5, "h": 0.6, "d": 0.40}
+        s2 = {"type": "box", "w": 0.4, "h": 0.5, "d": 0.35}
+        for seed in range(10):
+            items, _ = compose_cargo([s1, s2], "tandem", 0.0, self._rng(seed))
+            _, p1 = items[0]
+            _, p2 = items[1]
+            # Gap between faces = (oz2 - oz1) - (d1+d2)/2 must be ≥ 0.02
+            face_gap = (p2["oz"] - p1["oz"]) - (s1["d"] + s2["d"]) / 2
+            self.assertGreaterEqual(face_gap, 0.02 - 1e-6,
+                                    f"Solapamiento Z en seed={seed}")
+
+    def test_compose_tandem_placement_key(self):
+        s1 = {"type": "box", "w": 0.5, "h": 0.6, "d": 0.4}
+        s2 = {"type": "cylinder", "r": 0.18, "h": 0.5}
+        items, _ = compose_cargo([s1, s2], "tandem", 0.0, self._rng())
+        _, p2 = items[1]
+        self.assertEqual(p2["placement"], "tandem")
+
+    def test_compose_tandem_cargo_back_z(self):
+        """cargo_back_z: back face of the ensemble = -(d1+d2+gap)/2."""
+        s1 = {"type": "box", "w": 0.5, "h": 0.6, "d": 0.40}
+        s2 = {"type": "box", "w": 0.4, "h": 0.5, "d": 0.30}
+        _, back_z = compose_cargo([s1, s2], "tandem", 0.0, self._rng())
+        gap = 0.02
+        expected = -(s1["d"] + s2["d"] + gap) / 2
+        self.assertAlmostEqual(back_z, expected, places=4)
+
+    def test_compose_tandem_cargo2_always_front(self):
+        """cargo2 en tandem siempre en +Z (oz > 0), nunca detrás de cargo1."""
+        s1 = {"type": "box", "w": 0.5, "h": 0.6, "d": 0.40}
+        s2 = {"type": "cylinder", "r": 0.18, "h": 0.5}
+        for seed in range(20):
+            items, _ = compose_cargo([s1, s2], "tandem", 0.0, self._rng(seed))
+            _, p2 = items[1]
+            self.assertGreater(p2["oz"], 0.0,
+                               f"cargo2 en tandem está en -Z (oz={p2['oz']}) con seed={seed}")
+
+    # ── sample_cargo_spec — max_h (flat cargo) ──
+
+    def test_sample_cargo_spec_max_h_box(self):
+        """Con max_h, la caja no supera esa altura."""
+        cfg = CFG.copy()
+        cfg["p_cylinder"] = 0.0
+        cfg["box_min_h"] = 0.05
+        cfg["box_max_h"] = 1.40
+        max_h = 0.15
+        for seed in range(20):
+            spec = sample_cargo_spec(cfg, self._rng(seed), max_h=max_h)
+            self.assertLessEqual(spec["h"], max_h + 1e-9)
+
+    def test_sample_cargo_spec_max_h_cylinder(self):
+        """Con max_h, el cilindro no supera esa altura (usa flat_min_h como mínimo)."""
+        cfg = CFG.copy()
+        cfg["p_cylinder"] = 1.0
+        cfg["flat_min_h"] = 0.03
+        cfg["cyl_max_h"] = 1.20
+        max_h = 0.12
+        for seed in range(20):
+            spec = sample_cargo_spec(cfg, self._rng(seed), max_h=max_h)
+            self.assertLessEqual(spec["h"], max_h + 1e-9)
+
+    def test_compose_unknown_mode_raises(self):
+        s1 = {"type": "box", "w": 0.5, "h": 0.5, "d": 0.4}
+        s2 = {"type": "box", "w": 0.4, "h": 0.4, "d": 0.3}
+        with self.assertRaises(ValueError):
+            compose_cargo([s1, s2], "diagonal", 0.0, self._rng())
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 6. Degradación del sensor
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TestSensorDegradation(unittest.TestCase):
@@ -418,7 +734,7 @@ class TestSensorDegradation(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 6. Previews PNG
+# 7. Previews PNG
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TestPreviewGrid(unittest.TestCase):
@@ -450,7 +766,7 @@ class TestPreviewGrid(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 7. App — DEFAULTS dict
+# 8. App — DEFAULTS dict
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TestAppDefaults(unittest.TestCase):

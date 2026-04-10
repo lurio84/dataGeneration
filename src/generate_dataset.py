@@ -50,7 +50,10 @@ CFG = {
     ],
 
     # ── Scene composition ──
-    "p_two_boxes":  0.00,   # disabled — one box per scene
+    "p_multi_cargo": 0.00,  # prob. of secondary cargo (stacked/tandem)
+    "p_flat_cargo":  0.00,  # prob. of very flat/low cargo — hard near-floor case
+    "flat_min_h":    0.03,  # m  min height in flat-cargo mode (overrides box_min_h / cyl_min_h)
+    "flat_max_h":    0.15,  # m  max height in flat-cargo mode
     "p_person":     0.00,   # disabled for now
     "p_forklift":   0.00,   # disabled; always use primitive traspaleta
     "p_pallet":     1.00,   # EUR pallet always present under cargo
@@ -121,6 +124,150 @@ def make_cylinder_mesh(r: float, h: float) -> o3d.geometry.TriangleMesh:
     # After rotation cylinder spans Y=-h/2..+h/2 → translate up so bottom sits on Y=0
     m.translate([0.0, h / 2, 0.0])
     return m
+
+
+def _spec_w(spec: dict) -> float:
+    """X-width of a primitive spec (box→w, cylinder→2r)."""
+    return spec.get("w", spec.get("r", 0.0) * 2)
+
+
+def _spec_d(spec: dict) -> float:
+    """Z-depth of a primitive spec (box→d, cylinder→2r)."""
+    return spec.get("d", spec.get("r", 0.0) * 2)
+
+
+def make_primitive_mesh(spec: dict) -> o3d.geometry.TriangleMesh:
+    """Create mesh from a cargo spec dict. Bottom at Y=0, centred in XZ."""
+    t = spec["type"]
+    if t == "box":
+        return make_box_mesh(spec["w"], spec["h"], spec["d"])
+    if t == "cylinder":
+        return make_cylinder_mesh(spec["r"], spec["h"])
+    raise ValueError(f"Unknown primitive type: {t!r}")
+
+
+def sample_cargo_spec(
+    cfg: dict, rng,
+    max_w: float = None,
+    max_d: float = None,
+    max_h: float = None,
+) -> dict:
+    """Sample a single cargo primitive spec (box or cylinder).
+
+    max_w / max_d: upper-bound clamps on X-width / Z-depth (stacked mode: secondary ≤ primary).
+    max_h: upper-bound clamp on height (flat-cargo mode: very low / almost-floor-level).
+    """
+    flat_min = cfg.get("flat_min_h", 0.03)  # minimum height used only in flat-cargo mode
+    if rng.random() < cfg.get("p_cylinder", 0.0):
+        # Cylinder footprint is 2r × 2r — respect max_w / max_d so the upper cylinder
+        # never exceeds the lower cargo footprint (stability constraint in stacked mode).
+        if max_w is not None or max_d is not None:
+            max_dim = min(
+                max_w if max_w is not None else float("inf"),
+                max_d if max_d is not None else float("inf"),
+            )
+            r_max = min(cfg["cyl_max_r"], max_dim / 2)
+        else:
+            r_max = cfg["cyl_max_r"]
+        r_max = max(cfg["cyl_min_r"], r_max)
+        if max_h is not None:
+            h_lo, h_hi = flat_min, max(flat_min, min(cfg["cyl_max_h"], max_h))
+        else:
+            h_lo, h_hi = cfg["cyl_min_h"], cfg["cyl_max_h"]
+        return {
+            "type": "cylinder",
+            "r": float(rng.uniform(cfg["cyl_min_r"], r_max)),
+            "h": float(rng.uniform(h_lo, h_hi)),
+        }
+    w_max = min(cfg["box_max_w"], max_w) if max_w is not None else cfg["box_max_w"]
+    d_max = min(cfg["box_max_d"], max_d) if max_d is not None else cfg["box_max_d"]
+    if max_h is not None:
+        h_lo, h_hi = flat_min, max(flat_min, min(cfg["box_max_h"], max_h))
+    else:
+        h_lo, h_hi = cfg["box_min_h"], cfg["box_max_h"]
+    return {
+        "type": "box",
+        "w": float(rng.uniform(cfg["box_min_w"], max(cfg["box_min_w"], w_max))),
+        "h": float(rng.uniform(h_lo, h_hi)),
+        "d": float(rng.uniform(cfg["box_min_d"], max(cfg["box_min_d"], d_max))),
+    }
+
+
+def compose_cargo(
+    specs: list,
+    mode,           # "stacked" | "tandem" | None
+    pallet_top_y: float,
+    rng,
+) -> tuple:
+    """Position 1 or 2 cargo primitives and return positioned meshes.
+
+    Modes
+    -----
+    stacked : secondary cargo placed on top of primary (Y direction).
+    tandem  : secondary cargo placed in front of or behind primary (Z direction).
+              Keeps cargo within the pallet footprint — no X-axis spread.
+
+    Returns
+    -------
+    items : list of (positioned_mesh, placed_spec_dict)
+        placed_spec_dict is the original spec augmented with ox/oy/oz keys.
+    cargo_back_z : float
+        Most negative Z extent across all items — used to anchor the jack.
+    """
+    if len(specs) == 1 or mode is None:
+        spec = specs[0]
+        mesh = make_primitive_mesh(spec)
+        mesh.translate([0.0, pallet_top_y, 0.0])
+        placed = {**spec, "ox": 0.0, "oy": round(pallet_top_y, 4), "oz": 0.0}
+        return [(mesh, placed)], -_spec_d(spec) / 2
+
+    spec1, spec2 = specs[0], specs[1]
+    mesh1 = make_primitive_mesh(spec1)
+    mesh2 = make_primitive_mesh(spec2)
+
+    if mode == "stacked":
+        h1 = spec1.get("h", 0.0)
+        # Allow small offset only if spec2 is strictly smaller — keeps it on top
+        max_ox = max(0.0, (_spec_w(spec1) - _spec_w(spec2)) / 2)
+        max_oz = max(0.0, (_spec_d(spec1) - _spec_d(spec2)) / 2)
+        ox2 = float(rng.uniform(-max_ox, max_ox))
+        oz2 = float(rng.uniform(-max_oz, max_oz))
+        oy2 = pallet_top_y + h1
+        mesh1.translate([0.0, pallet_top_y, 0.0])
+        mesh2.translate([ox2, oy2, oz2])
+        # cargo_back_z uses only the BASE item: the stacked item is above, not beside,
+        # so it does not affect the jack position (jack goes under the pallet, not the cargo).
+        cargo_back_z = -_spec_d(spec1) / 2
+        items = [
+            (mesh1, {**spec1, "ox": 0.0, "oy": round(pallet_top_y, 4), "oz": 0.0}),
+            (mesh2, {**spec2, "ox": round(ox2, 4), "oy": round(oy2, 4),
+                     "oz": round(oz2, 4), "placement": "stacked"}),
+        ]
+        return items, cargo_back_z
+
+    if mode == "tandem":
+        # The two items are centred together on the pallet (Z=0):
+        #   cargo1 sits in the back half, cargo2 in the front half.
+        # Ensemble centre at Z=0 →
+        #   oz1 = -(d2 + gap) / 2   (behind centre)
+        #   oz2 = +(d1 + gap) / 2   (in front of centre)
+        # Constraint for pallet fit: d1 + gap + d2 ≤ EUR_D
+        gap = 0.02  # m clearance between items in Z  (matches generate_scene TANDEM_GAP)
+        d1, d2 = _spec_d(spec1), _spec_d(spec2)
+        oz1 = float(-(d2 + gap) / 2)
+        oz2 = float(+(d1 + gap) / 2)
+        mesh1.translate([0.0, pallet_top_y, oz1])
+        mesh2.translate([0.0, pallet_top_y, oz2])
+        # cargo_back_z: back face of cargo1 (most negative Z)
+        cargo_back_z = oz1 - d1 / 2   # = -(d1 + d2 + gap) / 2
+        items = [
+            (mesh1, {**spec1, "ox": 0.0, "oy": round(pallet_top_y, 4), "oz": round(oz1, 4)}),
+            (mesh2, {**spec2, "ox": 0.0, "oy": round(pallet_top_y, 4),
+                     "oz": round(oz2, 4), "placement": "tandem"}),
+        ]
+        return items, cargo_back_z
+
+    raise ValueError(f"Unknown compose mode: {mode!r}")
 
 
 def make_person_mesh() -> o3d.geometry.TriangleMesh:
@@ -411,47 +558,45 @@ def generate_scene(
         pallet_top_y = EUR_H
         meta["objects"].append("pallet")
 
-    # ── Primary cargo: cylinder or box ──
-    use_cylinder = rng.random() < cfg.get("p_cylinder", 0.0)
-    if use_cylinder:
-        r1 = float(rng.uniform(cfg["cyl_min_r"], cfg["cyl_max_r"]))
-        h1 = float(rng.uniform(cfg["cyl_min_h"], cfg["cyl_max_h"]))
-        d1 = r1 * 2  # footprint depth for jack placement
-        cm1 = make_cylinder_mesh(r1, h1)
-        cm1.translate([0.0, pallet_top_y, 0.0])
-        cp1, cl1 = sample_labeled(cm1, LABEL["cargo"], cfg["pts_box"])
-        obj_pts.append(cp1); obj_lbs.append(cl1)
-        meta["objects"].append({"cylinder1": {"r": round(r1, 3), "h": round(h1, 3)}})
-    else:
-        w1 = float(rng.uniform(cfg["box_min_w"], cfg["box_max_w"]))
-        d1 = float(rng.uniform(cfg["box_min_d"], cfg["box_max_d"]))
-        h1 = float(rng.uniform(cfg["box_min_h"], cfg["box_max_h"]))
-        # Cargo centred on pallet/origin — no random offset
-        bm1 = make_box_mesh(w1, h1, d1)
-        bm1.translate([0.0, pallet_top_y, 0.0])
-        bp1, bl1 = sample_labeled(bm1, LABEL["cargo"], cfg["pts_box"])
-        obj_pts.append(bp1); obj_lbs.append(bl1)
-        meta["objects"].append({"box1": {"w": round(w1, 3), "h": round(h1, 3), "d": round(d1, 3)}})
+    # ── Cargo (primary + optional secondary) ──
+    # Flat-cargo mode: very low height — simulates hard-to-separate cases near floor level.
+    flat_max_h: float | None = (
+        cfg.get("flat_max_h", 0.15) if rng.random() < cfg.get("p_flat_cargo", 0.0) else None
+    )
+    spec1 = sample_cargo_spec(cfg, rng, max_h=flat_max_h)
+    specs = [spec1]
+    compose_mode = None
 
-    # ── Cargo box 2 (optional) ──
-    if rng.random() < cfg["p_two_boxes"]:
-        w2 = float(rng.uniform(cfg["box_min_w"], min(w1, cfg["box_max_w"])))
-        d2 = float(rng.uniform(cfg["box_min_d"], min(d1, cfg["box_max_d"])))
-        h2 = float(rng.uniform(cfg["box_min_h"], cfg["box_max_h"]))
-        placement = rng.choice(["stacked", "adjacent"])
-        if placement == "stacked":
-            bm2 = make_box_mesh(w2, h2, d2)
-            bm2.translate([rng.uniform(-0.05, 0.05),
-                           pallet_top_y + h1,
-                           rng.uniform(-0.05, 0.05)])
-        else:  # adjacent on pallet / floor
-            side = rng.choice([-1, 1])
-            bm2 = make_box_mesh(w2, h2, d2)
-            bm2.translate([side * (w1 / 2 + w2 / 2 + 0.02), pallet_top_y, 0.0])
-        bp2, bl2 = sample_labeled(bm2, LABEL["cargo"], cfg["pts_box"])
-        obj_pts.append(bp2); obj_lbs.append(bl2)
-        meta["objects"].append({"box2": {"w": round(w2,3), "h": round(h2,3),
-                                          "d": round(d2,3), "placement": placement}})
+    if rng.random() < cfg.get("p_multi_cargo", 0.0):
+        compose_mode = str(rng.choice(["stacked", "tandem"]))
+        if compose_mode == "stacked":
+            # Secondary must not exceed primary footprint (so it doesn't topple off).
+            # Primary is already within the pallet → stacked item is too.
+            max_w2, max_d2, max_h2 = _spec_w(spec1), _spec_d(spec1), None
+            specs.append(sample_cargo_spec(cfg, rng, max_w=max_w2, max_d=max_d2, max_h=max_h2))
+        else:  # tandem
+            # Both items centred together on the pallet — ensemble centre at Z=0.
+            # Constraint for pallet fit: d1 + gap + d2 ≤ EUR_D
+            #   → d2 ≤ EUR_D - d1 - gap
+            TANDEM_GAP = 0.02  # m between items (matches compose_cargo)
+            max_d2 = EUR_D - _spec_d(spec1) - TANDEM_GAP
+            min_d2 = min(cfg["box_min_d"], cfg["cyl_min_r"] * 2)
+            if max_d2 >= min_d2:
+                max_h2 = flat_max_h   # keep flat mode consistent for secondary
+                specs.append(sample_cargo_spec(cfg, rng, max_w=None, max_d=max_d2, max_h=max_h2))
+            else:
+                # Primary too deep to fit any secondary in tandem — fall back to stacked
+                compose_mode = "stacked"
+                max_w2, max_d2_st, max_h2 = _spec_w(spec1), _spec_d(spec1), None
+                specs.append(sample_cargo_spec(cfg, rng, max_w=max_w2, max_d=max_d2_st, max_h=max_h2))
+
+    cargo_items, cargo_back_z = compose_cargo(specs, compose_mode, pallet_top_y, rng)
+
+    for i, (mesh, placed) in enumerate(cargo_items):
+        pts_c, lbs_c = sample_labeled(mesh, LABEL["cargo"], cfg["pts_box"])
+        obj_pts.append(pts_c)
+        obj_lbs.append(lbs_c)
+        meta["objects"].append({f"cargo{i + 1}": placed})
 
     # ── Pallet jack (always present) ──
     # Origin of make_pallet_jack_mesh: body-front / fork-root at (X=0, Y=0, Z=0).
@@ -463,10 +608,15 @@ def generate_scene(
     # With pallet: also respect the pallet back face (Z = -EUR_D/2 = -0.40m) —
     # whichever is further back wins so forks always fit under the pallet.
     MIN_JACK_GAP = 0.10   # m  (> 3 × noise_std=0.030 m)
-    cargo_back_z = -d1 / 2   # back face of primary cargo in Z
-    jack_front_z = cargo_back_z - MIN_JACK_GAP
     if has_pallet:
-        jack_front_z = min(jack_front_z, -EUR_D / 2)  # never closer than pallet back
+        # Jack carries the pallet — always anchored slightly behind the pallet back face.
+        # A 2cm clearance avoids visual noise-overlap where both surfaces share Z=-0.40m
+        # while keeping the forks fully inside the pallet fork pockets.
+        JACK_PALLET_CLEARANCE = 0.02   # m
+        jack_front_z = -EUR_D / 2 - JACK_PALLET_CLEARANCE  # = -0.42 m, fixed
+    else:
+        # No pallet: jack behind cargo back face with noise gap
+        jack_front_z = cargo_back_z - MIN_JACK_GAP
 
     tj = make_pallet_jack_mesh()
     tj.translate([0.0, 0.0, jack_front_z])
@@ -529,7 +679,10 @@ def parse_args(cfg: dict) -> dict:
     p.add_argument("--voxel",      type=float, default=cfg["voxel_size"],        help="Voxel grid size in metres   (default: %(default)s)")
     p.add_argument("--outliers",   type=float, default=cfg["outlier_ratio"],     help="Outlier ratio 0-1           (default: %(default)s)")
     # Scene composition probabilities
-    p.add_argument("--p-two-boxes",  type=float, default=cfg["p_two_boxes"],  metavar="P", help="Prob second cargo box  (default: %(default)s)")
+    p.add_argument("--p-multi-cargo", type=float, default=cfg["p_multi_cargo"], metavar="P", help="Prob secondary cargo primitive (stacked/tandem)  (default: %(default)s)")
+    p.add_argument("--p-flat-cargo",  type=float, default=cfg["p_flat_cargo"],  metavar="P", help="Prob very flat/low cargo (≤flat-max-h)           (default: %(default)s)")
+    p.add_argument("--flat-min-h",    type=float, default=cfg["flat_min_h"],    metavar="M", help="Min height for flat-cargo mode (m)               (default: %(default)s)")
+    p.add_argument("--flat-max-h",    type=float, default=cfg["flat_max_h"],    metavar="M", help="Max height for flat-cargo mode (m)               (default: %(default)s)")
     p.add_argument("--p-person",     type=float, default=cfg["p_person"],     metavar="P", help="Prob person in scene   (default: %(default)s)")
     p.add_argument("--p-forklift",   type=float, default=cfg["p_forklift"],   metavar="P", help="Prob forklift in scene (default: %(default)s)")
     p.add_argument("--p-pallet",     type=float, default=cfg["p_pallet"],     metavar="P", help="Prob EUR pallet base   (default: %(default)s)")
@@ -559,7 +712,10 @@ def parse_args(cfg: dict) -> dict:
     cfg["dropout_ratio"]  = args.dropout
     cfg["voxel_size"]     = args.voxel
     cfg["outlier_ratio"]  = args.outliers
-    cfg["p_two_boxes"]    = args.p_two_boxes
+    cfg["p_multi_cargo"]  = args.p_multi_cargo
+    cfg["p_flat_cargo"]   = args.p_flat_cargo
+    cfg["flat_min_h"]     = args.flat_min_h
+    cfg["flat_max_h"]     = args.flat_max_h
     cfg["p_person"]       = args.p_person
     cfg["p_forklift"]     = args.p_forklift
     cfg["p_pallet"]       = args.p_pallet
@@ -627,7 +783,7 @@ def main() -> None:
 
     print(f"Generating {cfg['n_samples']} scenes → {cfg['output_dir']}")
     print(f"  noise={cfg['noise_std']}m  dropout={cfg['dropout_ratio']}  voxel={cfg['voxel_size']}m")
-    print(f"  floor={cfg.get('enable_floor', True)}  p_pallet={cfg['p_pallet']}  p_person={cfg['p_person']}  p_two_boxes={cfg['p_two_boxes']}")
+    print(f"  floor={cfg.get('enable_floor', True)}  p_pallet={cfg['p_pallet']}  p_person={cfg['p_person']}  p_multi_cargo={cfg['p_multi_cargo']}")
 
     def print_progress(i, n):
         if i % 10 == 0 or i == n:
