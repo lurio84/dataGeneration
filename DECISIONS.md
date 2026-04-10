@@ -102,22 +102,21 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
 
 - **Método:** análisis cuantitativo sintético vs real con `analyze.py` (6 escenas FUSION3D reales, ROI crop X:±2.5m Y:-0.15..2.5m Z:±2.0m para comparación justa).
 - **Parámetros finales:**
-  - noise_std=0.030m (Gaussiano por punto)
+  - noise_std=0.035m (Gaussiano por punto; recalibrado 2026-04-10, era 0.030m)
   - voxel_size=0.019m (downsampling; calibrado a NN spacing real)
   - dropout_ratio=0.15, outlier_ratio=0.03, local_outlier_std=0.055m
   - Falloff de densidad ∝ 1/d² desde cámaras
-- **Resultados validados (2026-04-10, 20 escenas sintéticas, 6 reales):**
+- **Resultados finales (2026-04-10, noise_std=0.035m, 20 escenas vs 6 reales):**
   | Métrica | Sintético | Real FUSION3D | Estado |
   |---|---|---|---|
-  | NN spacing | 47.2mm | 51.3mm | ✅ (~8% diff) |
-  | Floor roughness σ | 24.8mm | 29.9mm (gap 5.1mm) | ⚠️ aceptable |
-  | Footprint X | 5.36m | 5.00m | ✅ |
-  | Footprint Z | 4.32m | 3.97m | ✅ |
+  | NN spacing | 49.9mm | 51.3mm | ✅ (2.7%) |
+  | Floor roughness σ | 26.7mm | 29.7mm | ✅ (gap 3.1mm) |
+  | Footprint X | 5.35m | 5.00m | ✅ |
+  | Footprint Z | 4.41m | 3.97m | ✅ |
   | Puntos/escena | 63k | 235k ROI | ℹ️ ver nota |
 - **Nota puntos/escena:** diferencia (3.7x) explicada por techo (~2.4m) y paredes en datos reales que el sintético no modela. La densidad local (NN spacing) sí está calibrada — es la métrica relevante para el clasificador.
-- **Nota techo:** el real tiene un pico de puntos a Y≈2.4m (techo del almacén) que el sintético no reproduce. Features de altura máxima en el clasificador pueden ver domain gap. Tener en cuenta al diseñar features de ML v6.
+- **Nota techo:** el real tiene un pico de puntos a Y≈2.4m (techo del almacén) que el sintético no reproduce. Tener en cuenta al diseñar features de ML v6.
 - **Nota roughness cargo:** la banda Y=0.2–1.6m no es válida para calibración — mide variación geométrica entre caras, no ruido del sensor.
-- **Recalibración sugerida:** noise_std 0.030→0.035m cerraría el gap de floor roughness (5mm). No urgente mientras el clasificador funcione bien.
 - **Pendiente con Paula:** validar patrones de oclusión y reflexiones especulares no cubiertos por el modelo Gaussiano.
 
 ---
