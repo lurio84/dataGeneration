@@ -121,43 +121,6 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
 
 ---
 
-## 9. Interfaz Streamlit (app.py)
-
-**Estado: ✅ Implementado (2026-04-09)**
-
-- **Fichero:** `src/app.py`, ejecutar con `streamlit run app.py` desde `src/`
-- **Parámetros controlables desde la UI:**
-  - Dataset: n_samples, seed, output_dir
-  - Composición de escena: enable_floor, floor_extent_x/z, p_pallet, p_two_boxes (⚠️ experimental), p_person
-  - Dimensiones de caja: rangos min/max de w, d, h
-  - Ruido del sensor: noise_std, dropout_ratio, outlier_ratio, voxel_size, local_outlier_std
-- **Funcionalidades:** botón "Restaurar valores por defecto", barra de progreso por escena, vista previa PNG con hover azul + click abre imagen completa en nueva pestaña, visor de metadata.json
-- **Tests:** `src/test_pipeline.py` — 79 tests totales (todos passing); ejecutar con `python3 -m pytest test_pipeline.py -v`
-- **Nota:** `p_two_boxes` fue renombrado a `p_multi_cargo` en el código. La UI muestra `p_multi_cargo`.
-
----
-
-## 10. Primitivo persona (p_person)
-
-**Estado: ✅ Decidido e implementado (2026-04-10)**
-
-- **Geometría:** malla STL realista (`data/person.stl`). Si el archivo no existe, fallback automático al cilindro+esfera escalado proporcionalmente a la altura objetivo.
-  - STL criteria: watertight, pose neutral de pie (A-pose o recta, no T-pose), < 50k triángulos, licencia CC0 o CC-BY.
-  - Fuentes candidatas: GrabCAD (`"human figure standing neutral pose STL"`), Sketchfab (filtro CC0, `"human standing neutral pose low-poly"`).
-  - Pre-procesado manual (MeshLab/Blender): escalar a 1.75m Y-up, base en Y=0, centrado en XZ, exportar STL binario en metros.
-- **`p_person`:** 0.30 (30% de escenas). Era 0.00.
-- **Altura:** 1.70–1.80m por escena (`rng.uniform(1.70, 1.80)`).
-- **Rotación Y:** aleatoria 0–360° por escena.
-- **Zonas de placement (con jack siempre presente):**
-  - Zona operario (60% de apariciones, requiere pallet presente): detrás del cuerpo del jack, Z ≈ `jack_back_z − [0.30..0.70]m`, X ∈ (−0.50, +0.50). El operario empuja la traspaleta desde ahí.
-  - Zona perímetro cargo (40%, o fallback si hay colisión): ángulo aleatorio 0-360° alrededor del pallet/cargo, radio = `half_diag + [0.30..0.70]m`.
-- **Collision check:** círculo de huella persona (r=0.30m) vs AABB del jack en XZ. Hasta 20 reintentos por zona.
-- **Metadata:** campo `person` en `objects` con `x`, `z`, `height`, `rot_deg`, `zone` ("operator"/"perimeter"), `stl` ("person.stl"/"fallback").
-- **Label:** 3, color verde (39, 174, 96). Sin cambios al label map ni formato PLY.
-- **Tests:** clase `TestPerson` (8 tests) añadida en `test_pipeline.py` (sección 9).
-
----
-
 ## 8. Generar dataset final
 
 **Estado: ✅ Dataset v1 generado (2026-04-10) — listo para revisión con Paula**
@@ -194,3 +157,40 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
   - Validación oclusión/reflexiones con Paula (§7)
   - Decidir si añadir techo/paredes para igualar point count real
   - Comando: `cd src && python3 generate_dataset.py --n 500 --seed 42 --p-cylinder 0.15 --p-multi-cargo 0.25 --p-flat-cargo 0.10`
+
+---
+
+## 9. Interfaz Streamlit (app.py)
+
+**Estado: ✅ Implementado (2026-04-09)**
+
+- **Fichero:** `src/app.py`, ejecutar con `streamlit run app.py` desde `src/`
+- **Parámetros controlables desde la UI:**
+  - Dataset: n_samples, seed, output_dir
+  - Composición de escena: enable_floor, floor_extent_x/z, p_pallet, p_two_boxes (⚠️ experimental), p_person
+  - Dimensiones de caja: rangos min/max de w, d, h
+  - Ruido del sensor: noise_std, dropout_ratio, outlier_ratio, voxel_size, local_outlier_std
+- **Funcionalidades:** botón "Restaurar valores por defecto", barra de progreso por escena, vista previa PNG con hover azul + click abre imagen completa en nueva pestaña, visor de metadata.json
+- **Tests:** `src/test_pipeline.py` — 79 tests totales (todos passing); ejecutar con `python3 -m pytest test_pipeline.py -v`
+- **Nota:** `p_two_boxes` fue renombrado a `p_multi_cargo` en el código. La UI muestra `p_multi_cargo`.
+
+---
+
+## 10. Primitivo persona (p_person)
+
+**Estado: ✅ Decidido e implementado (2026-04-10)**
+
+- **Geometría:** malla STL realista (`data/person.stl`). Si el archivo no existe, fallback automático al cilindro+esfera escalado proporcionalmente a la altura objetivo.
+  - STL criteria: watertight, pose neutral de pie (A-pose o recta, no T-pose), < 50k triángulos, licencia CC0 o CC-BY.
+  - Fuentes candidatas: GrabCAD (`"human figure standing neutral pose STL"`), Sketchfab (filtro CC0, `"human standing neutral pose low-poly"`).
+  - Pre-procesado manual (MeshLab/Blender): escalar a 1.75m Y-up, base en Y=0, centrado en XZ, exportar STL binario en metros.
+- **`p_person`:** 0.30 (30% de escenas). Era 0.00.
+- **Altura:** 1.70–1.80m por escena (`rng.uniform(1.70, 1.80)`).
+- **Rotación Y:** aleatoria 0–360° por escena.
+- **Zonas de placement (con jack siempre presente):**
+  - Zona operario (60% de apariciones, requiere pallet presente): detrás del cuerpo del jack, Z ≈ `jack_back_z − [0.30..0.70]m`, X ∈ (−0.50, +0.50). El operario empuja la traspaleta desde ahí.
+  - Zona perímetro cargo (40%, o fallback si hay colisión): ángulo aleatorio 0-360° alrededor del pallet/cargo, radio = `half_diag + [0.30..0.70]m`.
+- **Collision check:** círculo de huella persona (r=0.30m) vs AABB del jack en XZ. Hasta 20 reintentos por zona.
+- **Metadata:** campo `person` en `objects` con `x`, `z`, `height`, `rot_deg`, `zone` ("operator"/"perimeter"), `stl` ("person.stl"/"fallback").
+- **Label:** 3, color verde (39, 174, 96). Sin cambios al label map ni formato PLY.
+- **Tests:** clase `TestPerson` (8 tests) añadida en `test_pipeline.py` (sección 9).
