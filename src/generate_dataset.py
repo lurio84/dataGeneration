@@ -3,7 +3,7 @@ generate_dataset.py  —  Synthetic labeled point cloud dataset
 Simulates FUSION3D stereo-camera captures of cargo pallets.
 
 Coordinate system: X right, Y up (height), Z toward cameras   [metres]
-Calibrated to real FUSION3D noise: σ flat≈6.5mm, overall≈15mm → using 10mm
+Calibrated to real FUSION3D noise: σ flat≈6.5mm, overall≈15mm → using 35mm (floor roughness calibrated)
 
 Label map
   0  floor
@@ -34,7 +34,7 @@ CFG = {
     "output_dir":  "../output/dataset",
 
     # ── Sensor noise (FUSION3D: σ flat=6.5mm, overall≈30mm measured) ──
-    "noise_std":        0.030,   # m  Gaussian noise per point (calibrated to real roughness σ≈30mm)
+    "noise_std":        0.035,   # m  Gaussian noise per point (calibrated to real roughness σ≈30mm)
     "dropout_ratio":    0.15,    # fraction of points removed
     "outlier_ratio":    0.03,    # fraction turned into local outliers
     "voxel_size":       0.019,   # m  voxel grid; calibrated to real NN spacing ~55mm (was 10mm)
