@@ -50,8 +50,8 @@ CFG = {
     ],
 
     # ── Scene composition ──
-    "p_multi_cargo": 0.00,  # prob. of secondary cargo (stacked/tandem)
-    "p_flat_cargo":  0.00,  # prob. of very flat/low cargo — hard near-floor case
+    "p_multi_cargo": 0.25,  # prob. of secondary cargo (stacked/tandem)
+    "p_flat_cargo":  0.10,  # prob. of very flat/low cargo — hard near-floor case
     "flat_min_h":    0.03,  # m  min height in flat-cargo mode (overrides box_min_h / cyl_min_h)
     "flat_max_h":    0.15,  # m  max height in flat-cargo mode
     "p_person":     0.30,   # 30% de escenas tienen persona
@@ -73,7 +73,7 @@ CFG = {
     "floor_extent_z": 2.0,   # m  half-size along Z  → 4.0m total span
 
     # ── Cylinder cargo (alternative to box) ──
-    "p_cylinder":   0.00,   # probability of cylinder instead of box as primary cargo
+    "p_cylinder":   0.15,   # probability of cylinder instead of box as primary cargo
     "cyl_min_r":    0.15,   # m  radius min  (bobina pequeña / bidón)
     "cyl_max_r":    0.40,   # m  radius max  (bobina grande / depósito)
     "cyl_min_h":    0.30,   # m  height min

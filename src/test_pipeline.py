@@ -56,6 +56,8 @@ def _minimal_cfg(tmp_dir: str, **overrides) -> dict:
         "enable_floor":   True,
         "p_pallet":       1.0,
         "p_multi_cargo":  0.0,
+        "p_flat_cargo":   0.0,
+        "p_cylinder":     0.0,
         "p_person":       0.0,
         "p_forklift":     0.0,
     })
