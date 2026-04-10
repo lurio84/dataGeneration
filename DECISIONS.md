@@ -88,14 +88,11 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
 
 ## 6. Búsqueda de recursos mesh 3D (.stl / .obj)
 
-**Estado: ❓ Pendiente buscar**
+**Estado: 🟡 Parcialmente resuelto (2026-04-10)**
 
-- **Situación actual:** `forklift.stl` referenciado en el código pero no presente en `data/`; el sistema cae al primitivo de traspaleta automáticamente.
-- **Recursos a buscar:**
-  - Vehículos: carretilla elevadora, transpaleta, apilador
-  - Cargas: cajas reales, objetos voluminosos
-  - Persona: mesh realista para reemplazar el primitivo cilindro+esfera
-- **Fuentes candidatas:** GrabCAD, Thingiverse, BlenderKit, repositorios GitHub de datasets 3D industriales.
+- **Persona ✅:** `data/person.stl` — "Tim full figure" (Thingiverse thing:719701, CC BY-SA, by thowe). Scan fotogramétrico real de ~50 fotos, procesado con Netfabb+Meshmixer. Decimado a 40k triángulos, Z-up→Y-up, base plana eliminada. Listo para uso.
+- **Forklift ⏸:** `forklift.stl` referenciado en el código pero ausente en `data/`; el sistema usa el primitivo de traspaleta automáticamente. No es prioritario mientras el primitivo sea suficiente para el clasificador.
+- **Pendiente (baja prioridad):** meshes de carretilla elevadora o cargas irregulares si el clasificador necesita más variabilidad.
 
 ---
 
@@ -109,14 +106,18 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
   - voxel_size=0.019m (downsampling; calibrado a NN spacing real)
   - dropout_ratio=0.15, outlier_ratio=0.03, local_outlier_std=0.055m
   - Falloff de densidad ∝ 1/d² desde cámaras
-- **Resultados validados:**
+- **Resultados validados (2026-04-10, 20 escenas sintéticas, 6 reales):**
   | Métrica | Sintético | Real FUSION3D | Estado |
   |---|---|---|---|
-  | NN spacing | 47.5mm | 51.3mm | ✅ |
-  | Floor roughness σ | 24.8mm | 29.8mm (gap 5mm) | ✅ |
-  | Footprint X | 5.29m | 5.00m | ✅ |
-  | Footprint Z | 4.23m | 3.97m | ✅ |
-- **Nota:** la roughness en banda de cargo (Y=0.2–1.6m) no es una métrica válida — mide variación geométrica de caras laterales de la caja, no ruido del sensor.
+  | NN spacing | 47.2mm | 51.3mm | ✅ (~8% diff) |
+  | Floor roughness σ | 24.8mm | 29.9mm (gap 5.1mm) | ⚠️ aceptable |
+  | Footprint X | 5.36m | 5.00m | ✅ |
+  | Footprint Z | 4.32m | 3.97m | ✅ |
+  | Puntos/escena | 63k | 235k ROI | ℹ️ ver nota |
+- **Nota puntos/escena:** diferencia (3.7x) explicada por techo (~2.4m) y paredes en datos reales que el sintético no modela. La densidad local (NN spacing) sí está calibrada — es la métrica relevante para el clasificador.
+- **Nota techo:** el real tiene un pico de puntos a Y≈2.4m (techo del almacén) que el sintético no reproduce. Features de altura máxima en el clasificador pueden ver domain gap. Tener en cuenta al diseñar features de ML v6.
+- **Nota roughness cargo:** la banda Y=0.2–1.6m no es válida para calibración — mide variación geométrica entre caras, no ruido del sensor.
+- **Recalibración sugerida:** noise_std 0.030→0.035m cerraría el gap de floor roughness (5mm). No urgente mientras el clasificador funcione bien.
 - **Pendiente con Paula:** validar patrones de oclusión y reflexiones especulares no cubiertos por el modelo Gaussiano.
 
 ---
@@ -132,7 +133,8 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
   - Dimensiones de caja: rangos min/max de w, d, h
   - Ruido del sensor: noise_std, dropout_ratio, outlier_ratio, voxel_size, local_outlier_std
 - **Funcionalidades:** botón "Restaurar valores por defecto", barra de progreso por escena, vista previa PNG con hover azul + click abre imagen completa en nueva pestaña, visor de metadata.json
-- **Tests:** `src/test_pipeline.py` cubre 33 casos (geometría, PLY, composición, sensor, preview, defaults UI); ejecutar con `python3 -m pytest test_pipeline.py -v`
+- **Tests:** `src/test_pipeline.py` — 79 tests totales (todos passing); ejecutar con `python3 -m pytest test_pipeline.py -v`
+- **Nota:** `p_two_boxes` fue renombrado a `p_multi_cargo` en el código. La UI muestra `p_multi_cargo`.
 
 ---
 

@@ -513,9 +513,14 @@ def main() -> None:
     print(f"║    Synthetic  median={np.median(synth_nn)*1000:>5.1f}mm  mean={np.mean(synth_nn)*1000:>5.1f}mm            ║")
     print(f"║    Real       median={np.median(real_nn)*1000:>5.1f}mm  mean={np.mean(real_nn)*1000:>5.1f}mm            ║")
     nn_ratio = np.median(real_nn) / np.median(synth_nn)
-    print(f"║    Real is {nn_ratio:.1f}x sparser → voxel_size too small               ║")
-    voxel_recommended = 0.010 * nn_ratio
-    print(f"║    Recommended voxel_size ≈ {voxel_recommended*1000:.0f}mm  (currently 10mm)         ║")
+    voxel_cur_local = 0.019  # keep in sync with CFG
+    if nn_ratio > 1.0:
+        voxel_recommended = voxel_cur_local * nn_ratio
+        print(f"║    Synth {1/nn_ratio:.2f}x denser than real → could ↑ voxel_size          ║")
+    else:
+        voxel_recommended = voxel_cur_local
+        print(f"║    Synth sparser than real → voxel_size OK or ↓ slightly         ║")
+    print(f"║    Suggested voxel_size ≈ {voxel_recommended*1000:.0f}mm  (currently {voxel_cur_local*1000:.0f}mm)        ║")
     print(f"╠══════════════════════════════════════════════════════════════════╣")
     print(f"║ 3. LOCAL ROUGHNESS σ  (ROI-cropped real, 5cm grid cells)         ║")
     print(f"║    Floor band (|h|<6cm)                                          ║")
