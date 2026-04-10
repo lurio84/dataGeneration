@@ -128,7 +128,6 @@ with st.sidebar:
             "Prob. pallet EUR", 0.0, 1.0, step=0.05, key="p_pallet",
             value=DEFAULTS["p_pallet"],
         )
-        st.caption("⚠️ Experimental")
         p_multi_cargo = st.slider(
             "Prob. cargo múltiple (stacked/tandem)", 0.0, 1.0, step=0.05, key="p_multi_cargo",
             value=DEFAULTS["p_multi_cargo"],
