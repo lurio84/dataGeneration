@@ -51,3 +51,5 @@ Thumbs.db
 venv/
 # Generated output (datasets and previews)
 output/
+# Trained model files (too large to version)
+models/*.pkl

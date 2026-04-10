@@ -194,3 +194,75 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
 - **Metadata:** campo `person` en `objects` con `x`, `z`, `height`, `rot_deg`, `zone` ("operator"/"perimeter"), `stl` ("person.stl"/"fallback").
 - **Label:** 3, color verde (39, 174, 96). Sin cambios al label map ni formato PLY.
 - **Tests:** clase `TestPerson` (8 tests) añadida en `test_pipeline.py` (sección 9).
+
+---
+
+## 11. Clasificador ML por punto — 5 clases (§11)
+
+**Estado: ✅ Implementado (2026-04-10)**
+
+- **Problema:** etiquetar escenas reales sin ground truth manual.
+- **Solución:** entrenar sobre sintético calibrado (§7 + §8), predecir sobre PLYs reales.
+- **Archivos:**
+  - `src/classifier/features.py` — extracción de 15 features por punto
+  - `src/classifier/train.py` — entrenamiento RF + LightGBM, CV escena-level
+  - `src/classifier/predict.py` — inferencia sobre PLY sin etiquetar → PLY etiquetado
+  - `src/classifier/evaluate.py` — métricas, confusion matrix, feature importance
+  - `src/test_classifier.py` — 8 tests pytest (todos passing)
+  - `models/` — directorio versionado; `.pkl` gitignoreados (demasiado grandes)
+
+### Features (15 per-point)
+
+| # | Nombre | Descripción |
+|---|--------|-------------|
+| 0 | `y` | Altura absoluta |
+| 1 | `y_norm` | Altura relativa en la escena |
+| 2 | `z` | Profundidad (distancia a cámaras) |
+| 3 | `dist_xz` | Distancia radial horizontal al origen |
+| 4 | `local_density` | Puntos dentro de radio 0.15 m |
+| 5 | `nbr_y_mean` | Media de Y en los k=20 vecinos |
+| 6 | `nbr_y_std` | Std de Y en los k vecinos (rugosidad local) |
+| 7 | `height_range_local` | max(Y_nbrs) − min(Y_nbrs) |
+| 8 | `normal_y` | Componente Y del normal estimado por PCA local |
+| 9 | `curvature` | λ₃ / (λ₁+λ₂+λ₃) |
+| 10 | `planarity` | (λ₂−λ₃) / λ₁ |
+| 11 | `linearity` | (λ₁−λ₂) / λ₁ |
+| 12 | `sphericity` | λ₃ / λ₁ |
+| 13 | `verticality` | \|normal_y\| |
+| 14 | `dist_centroid_xz` | Distancia XZ al centroide de la escena |
+
+Implementación: `scipy.spatial.cKDTree` + `np.linalg.eigh` para PCA local (k=20 vecinos).
+Paralelización: `joblib.Parallel(prefer="threads")` sobre escenas en `load_dataset`.
+
+### Modelos comparados
+
+| Modelo | Hiperparámetros clave |
+|--------|----------------------|
+| RandomForest | n_estimators=300, max_depth=20, class_weight='balanced', n_jobs=-1 |
+| LightGBM | num_leaves=63, class_weight='balanced', n_jobs=-1 |
+
+CV: `StratifiedGroupKFold(n_splits=5)`, group=scene_id (sin data leakage entre puntos de la misma escena).
+
+### Resultados CV (dataset v1 — 100 escenas sintéticas, seed=42)
+
+CV config: `--cv-estimators 100 --cv-subsample 0.3` (30% estratificado por escena, 1.88M/6.25M pts).
+Feature extraction: 6.25M pts en 15.4s con 16 threads.
+
+| Clase | RF F1 | LGBM F1 |
+|-------|-------|---------|
+| floor | 0.9843 | — |
+| cargo | 0.9541 | — |
+| vehicle | 0.8688 | — |
+| person | 0.9886 | — |
+| pallet | 0.7830 | — |
+| **macro** | **0.9157** | **—** |
+
+RF folds: 0.9123 / 0.9194 / 0.9193 / 0.9134 / 0.9142 (σ=0.003, muy estable).
+Nota: `pallet` es la clase más difícil — superficie plana baja, geométricamente similar al suelo. `class_weight='balanced'` compensa la baja frecuencia de `person` (1.4%) con éxito (F1=0.9886).
+LGBM CV y retrain final pendientes — relanzar con `cd src && python3 -u classifier/train.py`.
+
+### Evaluación real V2 (pendiente post-Paula)
+
+- Dataset v1 entrenado sobre sintético calibrado (§8).
+- Validación cualitativa V1: `predict.py` sobre `logicarc_cargo_segmentation/colored_clouds/` (28 PLYs reales, etiquetado binario cargo/no-cargo) → comparar label=1 predicho con zona verde del GT.
+- V2: re-etiquetar ≥5 escenas reales con 5 clases (Paula + usuario) → test set formal con métricas reales por clase.
