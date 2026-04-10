@@ -37,7 +37,7 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
   - Caja centrada en pallet (ox=oz=0), jack centrado (jack_x=0)
   - Suelo activo: floor_extent_x=2.5m, floor_extent_z=2.0m (asimétrico, calibrado al FOV real)
 - **N escenas:** 100 por defecto, reproducible con seed=42.
-- **Acción pendiente:** ejecutar el dataset definitivo (≥100 escenas).
+- **Dataset v1 ejecutado (2026-04-10).** Ver §8 para resultados completos.
 
 ---
 
@@ -82,7 +82,7 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
   - `tandem`: cargo1 y cargo2 centrados juntos sobre el pallet en Z. `oz1 = -(d2+gap)/2`, `oz2 = +(d1+gap)/2`. Restricción: `d1 + 0.02 + d2 ≤ EUR_D=0.80m`. Si no cabe, fallback a stacked automático.
 - **Tipos mezclados:** cualquier combinación caja+caja, caja+cilindro, cilindro+cilindro.
 - **Flat cargo:** `p_flat_cargo` activa modo de carga muy baja (h ≤ flat_max_h), simula casos difíciles cerca del suelo.
-- **Tests:** 70 pytest (todos passing). `test_tandem_cargo_fits_within_pallet` verifica la restricción de pallet.
+- **Tests:** 79 pytest (todos passing). `test_tandem_cargo_fits_within_pallet` verifica la restricción de pallet.
 
 ---
 
@@ -167,12 +167,12 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
 - **Fichero:** `src/app.py`, ejecutar con `streamlit run app.py` desde `src/`
 - **Parámetros controlables desde la UI:**
   - Dataset: n_samples, seed, output_dir
-  - Composición de escena: enable_floor, floor_extent_x/z, p_pallet, p_two_boxes (⚠️ experimental), p_person
+  - Composición de escena: enable_floor, floor_extent_x/z, p_pallet, p_multi_cargo, p_flat_cargo, p_person, p_cylinder
+  - Dimensiones de cilindro: cyl_r (min/max), cyl_h (min/max)
   - Dimensiones de caja: rangos min/max de w, d, h
   - Ruido del sensor: noise_std, dropout_ratio, outlier_ratio, voxel_size, local_outlier_std
-- **Funcionalidades:** botón "Restaurar valores por defecto", barra de progreso por escena, vista previa PNG con hover azul + click abre imagen completa en nueva pestaña, visor de metadata.json
+- **Funcionalidades:** botón "Restaurar valores por defecto", barra de progreso por escena, vista previa PNG con hover azul + click abre imagen completa en nueva pestaña, visor de metadata.json, indicador de presencia de data/person.stl
 - **Tests:** `src/test_pipeline.py` — 79 tests totales (todos passing); ejecutar con `python3 -m pytest test_pipeline.py -v`
-- **Nota:** `p_two_boxes` fue renombrado a `p_multi_cargo` en el código. La UI muestra `p_multi_cargo`.
 
 ---
 
