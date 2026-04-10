@@ -2,7 +2,20 @@
 
 Synthetic labeled point cloud dataset generator for stereo-camera cargo inspection.
 
-Simulates the **FUSION3D** sensor system (CATEC/BBB): three cameras (cenital + der + izq) capturing pallets, cargo boxes, pallet jacks, and people in a warehouse environment. Noise parameters calibrated against real FUSION3D captures.
+Simulates the **FUSION3D** sensor system (CATEC/BBB): three cameras (cenital + der + izq) capturing pallets, cargo boxes, cylinders, pallet jacks, and people in a warehouse environment. Noise parameters calibrated against real FUSION3D captures.
+
+## Requirements
+
+- Python **3.10+** (uses `X | Y` union type syntax)
+- open3d 0.19.0, numpy 2.2.6, streamlit ≥ 1.35
+
+## Setup
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
 
 ## Structure
 
@@ -13,23 +26,15 @@ datageneration/
 │   ├── app.py                ← Streamlit UI
 │   ├── preview_grid.py       ← generate one PNG per scene (3 views)
 │   ├── analyze.py            ← statistical comparison vs real data
-│   └── test_pipeline.py      ← pytest test suite (37 tests)
+│   └── test_pipeline.py      ← pytest test suite (70 tests)
 ├── data/
-│   └── forklift.stl          ← forklift mesh (optional)
+│   └── forklift.stl          ← forklift mesh (optional, falls back to primitive)
 ├── output/
 │   ├── dataset/              ← generated PLY files + metadata.json
 │   ├── previews/             ← PNG previews
 │   └── analysis/             ← comparison figures vs real data
 ├── DECISIONS.md              ← design decisions log
 └── requirements.txt
-```
-
-## Setup
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
 ```
 
 ## Generate dataset
@@ -45,11 +50,14 @@ python3 generate_dataset.py
 # Custom number, seed and output folder
 python3 generate_dataset.py --n 500 --seed 99 --out ../output/my_run
 
-# With cylinders as cargo (bobinas, bidones) — 50% probability
+# Mixed cargo: boxes + cylinders (bobinas, bidones)
 python3 generate_dataset.py --n 100 --p-cylinder 0.5
 
-# Only cylinders
-python3 generate_dataset.py --n 100 --p-cylinder 1.0
+# Multi-cargo: secondary item stacked or in tandem — 70% of scenes
+python3 generate_dataset.py --n 100 --p-multi-cargo 0.7
+
+# Flat/low cargo (hard near-floor cases) — 30% of scenes
+python3 generate_dataset.py --n 100 --p-flat-cargo 0.3
 
 # Adjust sensor noise (defaults calibrated to real FUSION3D)
 python3 generate_dataset.py --noise 0.030 --dropout 0.15 --voxel 0.019
@@ -62,13 +70,16 @@ python3 generate_dataset.py --noise 0.030 --dropout 0.15 --voxel 0.019
 | `--n` | 100 | Number of scenes |
 | `--seed` | 42 | Random seed |
 | `--out` | `../output/dataset` | Output directory |
-| `--noise` | 0.030 | Gaussian noise σ (metres) — calibrated to FUSION3D |
+| `--noise` | 0.030 | Gaussian noise σ (metres) |
 | `--dropout` | 0.15 | Fraction of points randomly removed |
-| `--voxel` | 0.019 | Voxel grid size (metres) — calibrated to real NN spacing |
+| `--voxel` | 0.019 | Voxel grid size (metres) |
 | `--outliers` | 0.03 | Fraction turned into local outlier clusters |
-| `--p-pallet` | 1.0 | Probability of EUR pallet base |
+| `--p-pallet` | 1.0 | Probability of EUR pallet base (1.2 × 0.8 m) |
 | `--p-cylinder` | 0.0 | Probability of cylinder instead of box as primary cargo |
-| `--p-two-boxes` | 0.0 | Probability of second cargo box (experimental) |
+| `--p-multi-cargo` | 0.0 | Probability of a second cargo item (stacked or tandem) |
+| `--p-flat-cargo` | 0.0 | Probability of very low/flat cargo (near-floor hard case) |
+| `--flat-min-h` | 0.03 | Min height in flat-cargo mode (m) |
+| `--flat-max-h` | 0.15 | Max height in flat-cargo mode (m) |
 | `--p-person` | 0.0 | Probability of person in scene |
 | `--p-forklift` | 0.0 | Probability of forklift STL (requires `data/forklift.stl`) |
 | `--box-min-w` | 0.30 | Min cargo box X width (m) |
@@ -84,6 +95,13 @@ python3 generate_dataset.py --noise 0.030 --dropout 0.15 --voxel 0.019
 | `--floor-ext-x` | 2.5 | Floor half-extent along X (m) |
 | `--floor-ext-z` | 2.0 | Floor half-extent along Z (m) |
 
+## Multi-cargo modes
+
+When `--p-multi-cargo > 0`, a second cargo item is added using one of two modes chosen randomly:
+
+- **stacked** — cargo2 placed on top of cargo1. cargo2 footprint always ≤ cargo1 footprint (stability). Any primitive type combination allowed (box+box, box+cylinder, cylinder+cylinder).
+- **tandem** — cargo1 and cargo2 placed side by side in Z, centred together over the pallet. Combined depth `d1 + 0.02 + d2 ≤ 0.80 m` (EUR pallet depth). If the primary is too deep for any secondary to fit, falls back to stacked.
+
 ## Streamlit UI
 
 ```bash
@@ -91,7 +109,7 @@ cd src/
 streamlit run app.py
 ```
 
-Controls all parameters from a web interface, generates previews inline, and shows metadata.
+Controls all parameters from a web interface, shows a live progress bar, and renders previews inline. Includes a "Restaurar valores por defecto" button to reset all sliders.
 
 ## Output format
 
@@ -134,6 +152,15 @@ python3 preview_grid.py --dataset ../output/my_run --out ../output/my_previews
 
 Output: `output/previews/<id:05d>.png`
 
+## Tests
+
+```bash
+cd src/
+python3 -m pytest test_pipeline.py -v
+```
+
+70 tests covering geometry, PLY output, scene composition (single/stacked/tandem), flat-cargo mode, sensor degradation, previews, and UI defaults.
+
 ## Statistical analysis vs real data
 
 Compares synthetic output against real FUSION3D captures.
@@ -144,26 +171,7 @@ cd src/
 python3 analyze.py
 ```
 
-Saves 7 figures to `output/analysis/`:
-
-| Figure | Content |
-|---|---|
-| fig1 | Scene stats (point count, bounding box) |
-| fig2 | Height distributions |
-| fig3 | Top-down point density heatmaps |
-| fig4 | Surface roughness σ |
-| fig5 | Nearest-neighbour point spacing |
-| fig6 | Label distribution |
-| fig7 | Direct overlay: synthetic vs real |
-
-## Tests
-
-```bash
-cd src/
-python3 -m pytest test_pipeline.py -v
-```
-
-37 tests covering geometry, PLY output, scene composition, sensor degradation, previews, and UI defaults.
+Saves 7 figures to `output/analysis/`.
 
 ## Coordinate system
 
