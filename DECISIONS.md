@@ -266,8 +266,15 @@ Retrain full dataset (6.25M pts): RF 300 trees → 1864s, LGBM → 72s. Tamaños
 
 - Dataset v1 entrenado sobre sintético calibrado (§8).
 - **Validación cualitativa V1 — resultado (2026-04-13):** `predict.py` sobre `logicarc_cargo_segmentation/colored_clouds/T01_centro_bulto_grande_colored.ply` → FALLO: 69% clasificado como person, 0% como cargo. **Causa identificada:** las colored_clouds son crops pre-segmentados (1,595 pts, Y∈[-0.27, 1.15m]), no escenas completas. El clasificador espera escenas enteras con suelo en Y=0 y contexto 5×4m — los features posicionales (`dist_xz`, `y`, `z`, `dist_centroid_xz`) son incoherentes sobre un crop.
-- **Conclusión:** `predict.py` requiere PLYs de escena completa en el sistema de coordenadas del sensor (suelo en Y≈0, cámaras en Z≈0). El top-5 de features por importancia RF son todos posicionales → el modelo es frágil a shifts de coordenadas.
-- **Fix necesario para inferencia real:** o bien normalizar el PLY de entrada al mismo sistema de coordenadas (detectar suelo con RANSAC → alinear Y=0), o bien re-diseñar features puramente geométricas/locales (sin `y` absoluto ni `dist_xz`).
+- **Fix implementado (2026-04-13):** `predict.py` ahora incluye:
+  - `--align auto|fusion3d|none` (default: auto): detecta eje de suelo por histograma, hace swap Y↔Z si FUSION3D (Z-up), translada suelo a Y=0.
+  - ROI crop X:±2.5m, Y:-0.15..2.5m, Z:±2.0m — puntos fuera → label=255 (outlier), no pasan por clasificador.
+  - Input correcto: `Resources/Capturas_BBB/*/FUSION3D/fusion3d_merged_*.ply` (binary-LE, ~24–271k pts). No usar tri_cloud ni colored_clouds (distintos sistemas de coordenadas / crops pre-segmentados).
+- **Resultado validación visual (2026-04-13, Escenario_02/Captura_01, FUSION3D):**
+  - Carga principal (rojo) identificada correctamente ✅
+  - Traspaleta real diferente al modelo sintético (3 cajas primitivas) → confusión con person esperada
+  - Dos cajas adicionales entre carga principal y persona → clasificadas como person (verde), no como cargo
+  - Person sobrepredicado (~18% ROI vs 1.4% training): traspaleta real + cajas secundarias + persona juntos
 - **evaluate.py — OOM con RF:** re-entrenar 5 folds × 300 árboles RF sobre 6.25M pts excede la RAM. Workaround: `--model lgbm` para confusion matrix; feature importance RF generado desde pkl guardado (sin re-entrenamiento).
 - V2: re-etiquetar ≥5 escenas reales **completas** con 5 clases (Paula + usuario) → test set formal con métricas reales por clase.
 
@@ -277,6 +284,6 @@ Retrain full dataset (6.25M pts): RF 300 trees → 1864s, LGBM → 72s. Tamaños
 
 - [x] Rellenar columna LGBM en tabla §11 con F1 por clase (2026-04-13)
 - [x] `evaluate.py` → confusion matrix LGBM + feature importance RF en `output/classifier_eval/` (RF CV omitido: OOM, ver §11 evaluación real V2)
-- [x] `predict.py` → validación sobre T01 — FALLO por input incorrecto (crop vs escena completa), ver §11 evaluación real V2
+- [x] `predict.py` → validación sobre FUSION3D escena completa — carga principal detectada, fixes de alineamiento Y↔Z y ROI crop implementados (ver §11 evaluación real V2)
 - [ ] Commit rama developLucas (Track B + B9 + CLAUDE.md + §11 resultados + hallazgos evaluate/predict)
 - [ ] Dataset ≥500 escenas — **coordinar con Paula antes de generar**
