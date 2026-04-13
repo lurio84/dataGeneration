@@ -176,6 +176,26 @@ def read_ply_xyz(path: Path) -> np.ndarray:
         return np.stack([arr["x"], arr["y"], arr["z"]], axis=1).astype(np.float32)
 
 
+# ── ROI crop ─────────────────────────────────────────────────────────────────
+
+def roi_mask(
+    pts: np.ndarray,
+    x_range: tuple = (-2.5, 2.5),
+    y_range: tuple = (-0.15, 2.5),
+    z_range: tuple = (-2.0, 2.0),
+) -> np.ndarray:
+    """
+    Return boolean mask of points inside the ROI (synthetic scene extent).
+    Coordinate convention: Y-up, floor at Y=0.
+    Points outside ROI are assigned label=255 (outlier) without classification.
+    """
+    return (
+        (pts[:, 0] >= x_range[0]) & (pts[:, 0] <= x_range[1]) &
+        (pts[:, 1] >= y_range[0]) & (pts[:, 1] <= y_range[1]) &
+        (pts[:, 2] >= z_range[0]) & (pts[:, 2] <= z_range[1])
+    )
+
+
 # ── PLY writer (binary-LE: x y z red green blue label) ───────────────────────
 
 def write_labeled_ply(path: Path, pts: np.ndarray, labels: np.ndarray) -> None:
@@ -262,14 +282,21 @@ def main() -> None:
     else:
         print("Alignment: none (already Y-up, floor≈Y=0)")
 
-    feats = extract_features(pts)
-    feats_scaled = scaler.transform(feats)
-    labels = model.predict(feats_scaled).astype(np.uint8)
+    # Classify only points inside the ROI; outside → outlier (255)
+    mask = roi_mask(pts)
+    n_out = int((~mask).sum())
+    print(f"ROI crop: {mask.sum():,} in / {n_out:,} out (outlier=255)")
 
-    unique, counts = np.unique(labels, return_counts=True)
+    labels = np.full(len(pts), 255, dtype=np.uint8)
+    if mask.sum() > 0:
+        feats = extract_features(pts[mask])
+        feats_scaled = scaler.transform(feats)
+        labels[mask] = model.predict(feats_scaled).astype(np.uint8)
+
     label_map = payload.get("label_map", {})
     inv_map = {v: k for k, v in label_map.items()}
-    print("Predicted label distribution:")
+    print("Predicted label distribution (ROI only):")
+    unique, counts = np.unique(labels[mask], return_counts=True)
     for u, c in zip(unique, counts):
         print(f"  {u} ({inv_map.get(int(u), '?')}): {c:,}")
 
