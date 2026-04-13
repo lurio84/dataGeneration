@@ -12,12 +12,51 @@ import open3d as o3d
 # EUR pallet dimensions (m)
 EUR_W, EUR_H, EUR_D = 1.20, 0.144, 0.80
 
+# Pallet jack geometry constants — exported so composition/placement logic
+# can use them without duplicating magic numbers.
+JACK_FORK_H:  float = 0.06   # top surface of forks (platform height for cargo)
+JACK_FORK_L:  float = 1.15   # fork length in +Z direction
+JACK_BODY_D:  float = 0.40   # body depth in -Z direction
+JACK_X_HALF:  float = 0.35   # half-width of full vehicle bounding box
+
 
 def make_pallet_mesh() -> o3d.geometry.TriangleMesh:
-    """Standard EUR pallet: 1200×144×800 mm, centred on XZ at Y=0."""
-    m = o3d.geometry.TriangleMesh.create_box(EUR_W, EUR_H, EUR_D)
-    m.translate([-EUR_W / 2, 0.0, -EUR_D / 2])
-    return m
+    """EUR pallet with realistic top-deck slat geometry.
+
+    5 boards (1200 × 22 mm) run along X, separated by 19 mm gaps in Z.
+    A solid lower support box fills the remaining height beneath the boards.
+    Overall bounding box is identical to the old solid version:
+      X: [-EUR_W/2, EUR_W/2],  Y: [0, EUR_H],  Z: [-EUR_D/2, EUR_D/2]
+
+    The inter-slat gaps let floor points appear through the pallet top deck,
+    creating distinctive height_range_local and curvature features that help
+    the classifier separate pallet from flat floor.
+    """
+    slat_h = 0.022          # board thickness (22 mm)
+    n_slats = 5
+    gap = 0.019             # gap between boards (19 mm)
+    d_slat = (EUR_D - (n_slats - 1) * gap) / n_slats   # ≈ 0.1448 m
+
+    parts: list[o3d.geometry.TriangleMesh] = []
+
+    # Lower support structure — solid box beneath the boards
+    support_h = EUR_H - slat_h
+    support = o3d.geometry.TriangleMesh.create_box(EUR_W, support_h, EUR_D)
+    support.translate([-EUR_W / 2, 0.0, -EUR_D / 2])
+    parts.append(support)
+
+    # Top deck: 5 boards running along X (full width), spaced in Z
+    board_y = EUR_H - slat_h    # bottom face of top boards
+    for i in range(n_slats):
+        z0 = -EUR_D / 2 + i * (d_slat + gap)
+        board = o3d.geometry.TriangleMesh.create_box(EUR_W, slat_h, d_slat)
+        board.translate([-EUR_W / 2, board_y, z0])
+        parts.append(board)
+
+    mesh = parts[0]
+    for p in parts[1:]:
+        mesh = mesh + p
+    return mesh
 
 
 def make_box_mesh(w: float, h: float, d: float) -> o3d.geometry.TriangleMesh:
@@ -115,24 +154,57 @@ def make_person_mesh(
 
 
 def make_pallet_jack_mesh() -> o3d.geometry.TriangleMesh:
-    """
-    Simplified traspaleta (pallet jack).
-    Origin = body front face, floor level (Y=0, Z=0).
-    Forks extend in +Z (toward cargo/pallet).
-    Body extends in -Z (operator side).
+    """Manual pallet jack (transpaleta manual).
 
-    Local extents:
-      Body:   X:-0.35..+0.35, Y:0..0.90, Z:-0.40..0
-      Fork L: X:-0.30..-0.15, Y:0..0.08, Z:0..+1.15
-      Fork R: X:+0.15..+0.30, Y:0..0.08, Z:0..+1.15
+    Origin = fork-root / body-front at (X=0, Y=0, Z=0).
+    Forks extend in +Z (toward cargo/pallet).
+    Body and tiller extend in -Z (operator side).
+
+    Components:
+      Body  (pump unit):  X:-0.35..+0.35,  Y:0..0.15,   Z:-0.40..0
+      Fork L (horca izq): X:-0.30..-0.16,  Y:0..0.06,   Z:0..+1.15
+      Fork R (horca der): X:+0.16..+0.30,  Y:0..0.06,   Z:0..+1.15
+      Tiller arm L:       X:-0.17..-0.13,  Y:0.15..0.90, Z:-0.22..-0.18
+      Tiller arm R:       X:+0.13..+0.17,  Y:0.15..0.90, Z:-0.22..-0.18
+      Tiller crossbar:    X:-0.17..+0.17,  Y:0.86..0.90, Z:-0.22..-0.18
+
+    Overall bounding box: X:[-0.35,+0.35] (width=0.70), Y:[0,0.90], Z:[-0.40,+1.15]
+    Same XZ footprint as before so generate_dataset.py placement constants are unchanged.
+
+    The U-shaped tiller creates a distinctive tall vertical+horizontal structure
+    with high `linearity` and `lam_ratio_12` features — separating vehicle from
+    the compact cargo class geometrically rather than positionally.
     """
-    body = o3d.geometry.TriangleMesh.create_box(0.70, 0.90, 0.40)
+    # Body: low compact pump unit
+    body = o3d.geometry.TriangleMesh.create_box(0.70, 0.15, 0.40)
     body.translate([-0.35, 0.0, -0.40])
-    fork_l = o3d.geometry.TriangleMesh.create_box(0.15, 0.08, 1.15)
-    fork_l.translate([-0.35, 0.0, 0.0])
-    fork_r = o3d.geometry.TriangleMesh.create_box(0.15, 0.08, 1.15)
-    fork_r.translate([ 0.20, 0.0, 0.0])
-    return body + fork_l + fork_r
+
+    # Forks: flat, elongated — extend in +Z toward cargo/pallet
+    fork_l = o3d.geometry.TriangleMesh.create_box(0.14, 0.06, JACK_FORK_L)
+    fork_l.translate([-0.30, 0.0, 0.0])
+    fork_r = o3d.geometry.TriangleMesh.create_box(0.14, 0.06, JACK_FORK_L)
+    fork_r.translate([ 0.16, 0.0, 0.0])
+
+    # Tiller (timón): U-shaped handle rising from body back
+    # Two vertical arms + one horizontal crossbar at top
+    arm_w, arm_d = 0.04, 0.04   # arm cross-section
+    tiller_z0 = -0.22            # front face of tiller (within body)
+    arm_y0    = 0.15             # tiller starts at top of body
+    arm_h     = 0.75             # arm height → top at Y = 0.90
+    arm_x_off = 0.13             # inner edge offset from centreline
+
+    arm_l = o3d.geometry.TriangleMesh.create_box(arm_w, arm_h, arm_d)
+    arm_l.translate([-arm_x_off - arm_w, arm_y0, tiller_z0])
+
+    arm_r = o3d.geometry.TriangleMesh.create_box(arm_w, arm_h, arm_d)
+    arm_r.translate([ arm_x_off,         arm_y0, tiller_z0])
+
+    # Crossbar spans between the outer edges of both arms
+    bar_w = 2 * (arm_x_off + arm_w)
+    bar   = o3d.geometry.TriangleMesh.create_box(bar_w, arm_w, arm_d)
+    bar.translate([-bar_w / 2, arm_y0 + arm_h - arm_w, tiller_z0])
+
+    return body + fork_l + fork_r + arm_l + arm_r + bar
 
 
 def load_forklift(stl_path: str) -> o3d.geometry.TriangleMesh:

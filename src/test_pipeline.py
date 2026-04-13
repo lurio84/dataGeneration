@@ -27,6 +27,7 @@ from generate_dataset import (
     make_primitive_mesh,
     sample_cargo_spec,
     compose_cargo,
+    compose_cargo_on_vehicle,
     _spec_w,
     _spec_d,
     sample_labeled,
@@ -36,6 +37,7 @@ from generate_dataset import (
     LABEL_RGB,
     EUR_W, EUR_H, EUR_D,
 )
+from geometry.meshes import JACK_FORK_H, JACK_FORK_L
 from utils.preview_grid import render_scene, load_synth
 
 
@@ -920,6 +922,41 @@ class TestPerson(unittest.TestCase):
                       if isinstance(o, dict) and "person" in o), None)
             if p is not None:
                 self.assertIn(p["zone"], ("operator", "perimeter"))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 10. Cargo sobre horcas (A1)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestCargoOnVehicle(unittest.TestCase):
+    """Tests para compose_cargo_on_vehicle y escenas sin pallet (A1)."""
+
+    def test_cargo_on_vehicle_base_at_fork_height(self):
+        """compose_cargo_on_vehicle: base del cargo en Y=JACK_FORK_H."""
+        rng = np.random.default_rng(0)
+        spec = {"type": "box", "w": 0.60, "h": 0.50, "d": 0.40}
+        _mesh, placed = compose_cargo_on_vehicle(spec, rng)
+        self.assertAlmostEqual(placed["oy"], JACK_FORK_H, places=4)
+        self.assertGreaterEqual(placed["oz"], 0.0)
+        self.assertLessEqual(placed["oz"], JACK_FORK_L)
+        self.assertGreaterEqual(placed["ox"], -0.20)
+        self.assertLessEqual(placed["ox"],  0.20)
+
+    def test_no_pallet_scene_generates(self):
+        """p_pallet=0: escena sin pallet contiene cargo y pallet_jack."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _minimal_cfg(tmp, p_pallet=0.0, p_cargo_on_vehicle=1.0)
+            meta = run_generation(cfg)
+            for m in meta:
+                self.assertNotIn("pallet", m["objects"])
+                has_cargo = any(
+                    isinstance(o, dict) and "cargo1" in o for o in m["objects"]
+                )
+                self.assertTrue(has_cargo, "cargo1 no encontrado en escena sin pallet")
+                has_jack = any(
+                    isinstance(o, dict) and "pallet_jack" in o for o in m["objects"]
+                )
+                self.assertTrue(has_jack, "pallet_jack no encontrado en escena sin pallet")
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

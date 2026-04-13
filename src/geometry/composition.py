@@ -6,7 +6,7 @@ Moved from generate_dataset.py (B9 refactor).
 
 import numpy as np
 
-from geometry.meshes import make_primitive_mesh, EUR_D
+from geometry.meshes import make_primitive_mesh, EUR_D, JACK_FORK_H, JACK_FORK_L
 
 
 def _spec_w(spec: dict) -> float:
@@ -141,3 +141,25 @@ def compose_cargo(
         return items, cargo_back_z
 
     raise ValueError(f"Unknown compose mode: {mode!r}")
+
+
+def compose_cargo_on_vehicle(spec: dict, rng) -> tuple:
+    """Position a single cargo primitive on top of the jack forks.
+
+    The pallet jack origin is (X=0, Y=0, Z=0) — forks extend in +Z from 0 to JACK_FORK_L.
+    Cargo base sits at Y=JACK_FORK_H; centre is randomised within the fork footprint.
+
+    Returns
+    -------
+    mesh : positioned TriangleMesh
+    placed : spec dict augmented with ox / oy / oz
+    """
+    d = _spec_d(spec)
+    oz_min = d / 2
+    oz_max = max(oz_min, JACK_FORK_L - d / 2)
+    oz = float(rng.uniform(oz_min, oz_max))
+    ox = float(rng.uniform(-0.20, 0.20))
+    mesh = make_primitive_mesh(spec)
+    mesh.translate([ox, JACK_FORK_H, oz])
+    placed = {**spec, "ox": round(ox, 4), "oy": round(JACK_FORK_H, 4), "oz": round(oz, 4)}
+    return mesh, placed

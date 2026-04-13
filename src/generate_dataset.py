@@ -59,7 +59,8 @@ CFG = {
     "flat_max_h":    0.15,  # m  max height in flat-cargo mode
     "p_person":     0.30,   # 30% de escenas tienen persona
     "p_forklift":   0.00,   # disabled; always use primitive traspaleta
-    "p_pallet":     1.00,   # EUR pallet always present under cargo
+    "p_pallet":     0.80,   # EUR pallet present under cargo (20% sin pallet)
+    "p_cargo_on_vehicle": 0.50,  # cuando no hay pallet: prob. de cargo sobre horcas
     "enable_floor": True,   # include floor plane points
 
     # Cargo box size range (m) — axis-aligned only, fits within EUR pallet footprint
@@ -103,7 +104,7 @@ from geometry.meshes import (
     make_primitive_mesh, make_person_mesh, make_pallet_jack_mesh, load_forklift,
 )
 from geometry.composition import (
-    _spec_w, _spec_d, sample_cargo_spec, compose_cargo,
+    _spec_w, _spec_d, sample_cargo_spec, compose_cargo, compose_cargo_on_vehicle,
 )
 from sensor.noise import (
     sample_labeled, sample_floor,
@@ -117,7 +118,7 @@ __all__ = [
     "EUR_W", "EUR_H", "EUR_D",
     "make_pallet_mesh", "make_box_mesh", "make_cylinder_mesh",
     "make_primitive_mesh", "make_person_mesh", "make_pallet_jack_mesh", "load_forklift",
-    "_spec_w", "_spec_d", "sample_cargo_spec", "compose_cargo",
+    "_spec_w", "_spec_d", "sample_cargo_spec", "compose_cargo", "compose_cargo_on_vehicle",
     "sample_labeled", "sample_floor",
     "camera_arc_filter", "apply_distance_density", "degrade_labeled",
     "labels_to_rgb", "save_ply",
@@ -212,7 +213,16 @@ def generate_scene(
                 max_w2, max_d2_st, max_h2 = _spec_w(spec1), _spec_d(spec1), None
                 specs.append(sample_cargo_spec(cfg, rng, max_w=max_w2, max_d=max_d2_st, max_h=max_h2))
 
-    cargo_items, cargo_back_z = compose_cargo(specs, compose_mode, pallet_top_y, rng)
+    # ── Cargo composition — normal vs cargo-on-vehicle ──
+    has_cargo_on_vehicle = (
+        not has_pallet and rng.random() < cfg.get("p_cargo_on_vehicle", 0.50)
+    )
+    if has_cargo_on_vehicle:
+        # BBB-5 scenario: cargo placed directly on fork tops, no pallet beneath.
+        mesh, placed = compose_cargo_on_vehicle(specs[0], rng)
+        cargo_items = [(mesh, placed)]
+    else:
+        cargo_items, cargo_back_z = compose_cargo(specs, compose_mode, pallet_top_y, rng)
 
     for i, (mesh, placed) in enumerate(cargo_items):
         pts_c, lbs_c = sample_labeled(mesh, LABEL["cargo"], cfg["pts_box"])
@@ -229,15 +239,16 @@ def generate_scene(
     # cause visible interpenetration.  min_gap = 3×noise_std ≈ 0.10 m.
     # With pallet: also respect the pallet back face (Z = -EUR_D/2 = -0.40m) —
     # whichever is further back wins so forks always fit under the pallet.
-    MIN_JACK_GAP = 0.10   # m  (> 3 × noise_std=0.030 m)
+    MIN_JACK_GAP = 0.10          # m  (> 3 × noise_std=0.030 m)
+    JACK_PALLET_CLEARANCE = 0.02  # m  avoids noise-overlap at pallet back face
     if has_pallet:
         # Jack carries the pallet — always anchored slightly behind the pallet back face.
-        # A 2cm clearance avoids visual noise-overlap where both surfaces share Z=-0.40m
-        # while keeping the forks fully inside the pallet fork pockets.
-        JACK_PALLET_CLEARANCE = 0.02   # m
         jack_front_z = -EUR_D / 2 - JACK_PALLET_CLEARANCE  # = -0.42 m, fixed
+    elif has_cargo_on_vehicle:
+        # Cargo is on the forks — jack stays at world origin (forks at Z=0..JACK_FORK_L)
+        jack_front_z = 0.0
     else:
-        # No pallet: jack behind cargo back face with noise gap
+        # No pallet, cargo on floor — jack behind cargo back face with noise gap
         jack_front_z = cargo_back_z - MIN_JACK_GAP
 
     tj = make_pallet_jack_mesh()
