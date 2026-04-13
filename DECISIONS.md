@@ -73,16 +73,17 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
 
 ## 5. Función para combinar primitivos en casos complejos
 
-**Estado: ✅ Implementado (2026-04-10)**
+**Estado: ✅ Implementado (2026-04-10) — ampliado con cargo-on-vehicle (2026-04-13)**
 
-- **Funciones:** `make_primitive_mesh(spec)`, `sample_cargo_spec(cfg, rng, max_w, max_d, max_h)`, `compose_cargo(specs, mode, pallet_top_y, rng)`
+- **Funciones:** `make_primitive_mesh(spec)`, `sample_cargo_spec(cfg, rng, max_w, max_d, max_h)`, `compose_cargo(specs, mode, pallet_top_y, rng)`, `compose_cargo_on_vehicle(spec, rng)`
 - **Parámetro:** `p_multi_cargo` (0–1) reemplaza `p_two_boxes`; también `p_flat_cargo`, `flat_min_h`, `flat_max_h`
 - **Modos implementados:**
   - `stacked`: cargo2 encima del cargo1 en Y. Cargo2 nunca más ancho/profundo que cargo1 (estabilidad). `cargo_back_z` solo de cargo1.
   - `tandem`: cargo1 y cargo2 centrados juntos sobre el pallet en Z. `oz1 = -(d2+gap)/2`, `oz2 = +(d1+gap)/2`. Restricción: `d1 + 0.02 + d2 ≤ EUR_D=0.80m`. Si no cabe, fallback a stacked automático.
+  - `cargo_on_vehicle`: cargo (spec único) sobre las horcas de la traspaleta. Base en Y=JACK_FORK_H=0.06m. XZ aleatorio dentro del footprint: ox∈[-0.20,+0.20], oz∈[d/2, JACK_FORK_L-d/2]. Jack queda en origen (front_z=0). Activado via `p_cargo_on_vehicle` cuando `has_pallet=False`.
 - **Tipos mezclados:** cualquier combinación caja+caja, caja+cilindro, cilindro+cilindro.
 - **Flat cargo:** `p_flat_cargo` activa modo de carga muy baja (h ≤ flat_max_h), simula casos difíciles cerca del suelo.
-- **Tests:** 79 pytest (todos passing). `test_tandem_cargo_fits_within_pallet` verifica la restricción de pallet.
+- **Tests:** 89 pytest (todos passing). `TestCargoOnVehicle` verifica base en Y=JACK_FORK_H y escena sin pallet completa.
 
 ---
 
@@ -125,22 +126,16 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
 
 **Estado: ✅ Dataset v1 generado (2026-04-10) — listo para revisión con Paula**
 
-- **Dataset v1 (validación):** 100 escenas, seed=42, parámetros calibrados.
-- **Comando ejecutado:**
-  ```
-  cd src && python3 generate_dataset.py \
-    --n 100 --seed 42 \
-    --p-cylinder 0.15 \
-    --p-multi-cargo 0.25 \
-    --p-flat-cargo 0.10
-  ```
-- **Probabilidades de escena activas:**
-  | Parámetro | Valor | Justificación |
-  |---|---|---|
-  | `p_person` | 0.30 | Calibrado (§10) |
-  | `p_multi_cargo` | 0.25 | ~25% escenas con carga doble (stacked/tandem) |
-  | `p_flat_cargo` | 0.10 | ~10% caso difícil near-floor (h≤15cm) |
-  | `p_cylinder` | 0.15 | ~15% cilindros (bobinas/bidones); diversidad sintética |
+- **Dataset v1 (validación):** 100 escenas iniciales, seed=42. `output/dataset/` acumula actualmente 139 PLYs de iteraciones previas.
+- **CFG activo para dataset v2:**
+  | Parámetro | v1 | v2 | Justificación cambio |
+  |---|---|---|---|
+  | `p_pallet` | 1.00 | **0.80** | 20% escenas sin pallet — patrón BBB-5 real |
+  | `p_cargo_on_vehicle` | — | **0.50** | Cuando sin pallet: 50% cargo sobre horcas |
+  | `p_person` | 0.30 | 0.30 | Sin cambio |
+  | `p_multi_cargo` | 0.25 | 0.25 | Sin cambio |
+  | `p_flat_cargo` | 0.10 | 0.10 | Sin cambio |
+  | `p_cylinder` | 0.15 | 0.15 | Sin cambio |
 - **Resultados analyze.py vs 6 escenas reales:**
   | Métrica | Sintético | Real FUSION3D | Estado |
   |---|---|---|---|
@@ -193,7 +188,7 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
 - **Collision check:** círculo de huella persona (r=0.30m) vs AABB del jack en XZ. Hasta 20 reintentos por zona.
 - **Metadata:** campo `person` en `objects` con `x`, `z`, `height`, `rot_deg`, `zone` ("operator"/"perimeter"), `stl` ("person.stl"/"fallback").
 - **Label:** 3, color verde (39, 174, 96). Sin cambios al label map ni formato PLY.
-- **Tests:** clase `TestPerson` (8 tests) añadida en `test_pipeline.py` (sección 9).
+- **Tests:** clase `TestPerson` (8 tests) añadida en `test_pipeline.py` (sección 9). Total: 89 tests.
 
 ---
 
@@ -211,27 +206,32 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
   - `src/test_classifier.py` — 8 tests pytest (todos passing)
   - `models/` — directorio versionado; `.pkl` gitignoreados (demasiado grandes)
 
-### Features (15 per-point)
+### Features (16 per-point) — post-rediseño 2026-04-13
+
+**Eliminadas** (causaban predicción posicional en anillo — validado visualmente en 6 escenas BBB):
+- `dist_xz` — distancia radial XZ al origen → vehicle/person clasificados por posición, no forma
+- `dist_centroid_xz` — distancia XZ al centroide de escena → mismo efecto
 
 | # | Nombre | Descripción |
 |---|--------|-------------|
 | 0 | `y` | Altura absoluta |
 | 1 | `y_norm` | Altura relativa en la escena |
 | 2 | `z` | Profundidad (distancia a cámaras) |
-| 3 | `dist_xz` | Distancia radial horizontal al origen |
-| 4 | `local_density` | Puntos dentro de radio 0.15 m |
-| 5 | `nbr_y_mean` | Media de Y en los k=20 vecinos |
-| 6 | `nbr_y_std` | Std de Y en los k vecinos (rugosidad local) |
-| 7 | `height_range_local` | max(Y_nbrs) − min(Y_nbrs) |
-| 8 | `normal_y` | Componente Y del normal estimado por PCA local |
-| 9 | `curvature` | λ₃ / (λ₁+λ₂+λ₃) |
-| 10 | `planarity` | (λ₂−λ₃) / λ₁ |
-| 11 | `linearity` | (λ₁−λ₂) / λ₁ |
-| 12 | `sphericity` | λ₃ / λ₁ |
-| 13 | `verticality` | \|normal_y\| |
-| 14 | `dist_centroid_xz` | Distancia XZ al centroide de la escena |
+| 3 | `local_density` | Puntos dentro de radio 0.15 m |
+| 4 | `nbr_y_mean` | Media de Y en los k=20 vecinos |
+| 5 | `nbr_y_std` | Std de Y en los k vecinos (rugosidad local) |
+| 6 | `height_range_local` | max(Y_nbrs) − min(Y_nbrs) |
+| 7 | `normal_y` | Componente Y del normal estimado por PCA local |
+| 8 | `curvature` | λ₃ / (λ₁+λ₂+λ₃) |
+| 9 | `planarity` | (λ₂−λ₃) / λ₁ |
+| 10 | `linearity` | (λ₁−λ₂) / λ₁ |
+| 11 | `sphericity` | λ₃ / λ₁ |
+| 12 | `verticality` | \|normal_y\| |
+| 13 | `normal_y_std` | Std de normal_y en k-NN → regularidad de superficie |
+| 14 | `lam_ratio_12` | λ₁/λ₂ → elongación (horcas/persona vs caras de caja) |
+| 15 | `planarity_large` | Planarity a k=50 → forma macro-escala |
 
-Implementación: `scipy.spatial.cKDTree` + `np.linalg.eigh` para PCA local (k=20 vecinos).
+Implementación: `scipy.spatial.cKDTree` + `np.linalg.eigh` para PCA local (k=20 y k=50).
 Paralelización: `joblib.Parallel(prefer="threads")` sobre escenas en `load_dataset`.
 
 ### Modelos comparados
@@ -283,7 +283,60 @@ Retrain full dataset (6.25M pts): RF 300 trees → 1864s, LGBM → 72s. Tamaños
 ## Pendiente
 
 - [x] Rellenar columna LGBM en tabla §11 con F1 por clase (2026-04-13)
-- [x] `evaluate.py` → confusion matrix LGBM + feature importance RF en `output/classifier_eval/` (RF CV omitido: OOM, ver §11 evaluación real V2)
-- [x] `predict.py` → validación sobre FUSION3D escena completa — carga principal detectada, fixes de alineamiento Y↔Z y ROI crop implementados (ver §11 evaluación real V2)
-- [ ] Commit rama developLucas (Track B + B9 + CLAUDE.md + §11 resultados + hallazgos evaluate/predict)
-- [ ] Dataset ≥500 escenas — **coordinar con Paula antes de generar**
+- [x] `evaluate.py` → confusion matrix LGBM + feature importance RF en `output/classifier_eval/`
+- [x] `predict.py` → validación sobre FUSION3D escena completa — fixes align + ROI crop implementados
+- [x] **Commit ce54270** en `developLucas` — features 16, meshes reales, A1 cargo-on-vehicle, 89 tests
+- [x] Features rediseñadas — eliminados dist_xz + dist_centroid_xz, añadidos 3 nuevas (2026-04-13)
+- [x] Meshes reales — pallet 5 tablones, traspaleta cuerpo bajo + horcas planas + timón en U (2026-04-13)
+- [x] A1 — cargo-on-vehicle: compose_cargo_on_vehicle, p_pallet=0.80, p_cargo_on_vehicle=0.50 (2026-04-13)
+- [ ] **Decidir estrategia no-floor para v2** — ver §12 para análisis completo
+- [ ] Dataset v2 ≥500 escenas — Paula OK obtenido, pendiente tras decisión §12
+- [ ] Retrain RF+LGBM sobre dataset v2 con 16 features
+- [ ] Validación visual post-retrain sobre 6 escenas BBB (comparar con output/fase0/)
+
+---
+
+## 12. Experimento no-floor — entrenamiento sin clase suelo
+
+**Estado: 🔴 Decisión pendiente (2026-04-13)**
+
+**Motivación:** floor representa ~77% de los puntos en el dataset (label=0). Es la clase más fácil de separar (Y bajo, planarity=1, normal_y≈1). Hipótesis: excluirlo del training podría mejorar F1 en clases difíciles (vehicle, pallet) y reducir tiempo de entrenamiento ~4×.
+
+**Implementación:**
+- `train.py --no-floor`: filtra label=0 antes de CV y retrain final
+- `predict.py --floor-threshold Y`: puntos con Y < threshold → label=0 directamente sin clasificador
+- Modelos guardados en `models/no_floor/` (RF + LGBM)
+- Predicciones BBB en `output/bbb_nofloor/`
+
+**Resultados CV RF (139 escenas, 16 features nuevas):**
+
+| Clase | with_floor (ref v1, features antiguas) | no_floor (experimento) | Δ |
+|-------|---------------------------------------|------------------------|---|
+| floor | 0.9843 | — (excluida) | — |
+| cargo | 0.9541 | 0.9258 | −0.028 |
+| vehicle | 0.8688 | 0.8599 | −0.009 |
+| person | 0.9886 | 0.8956 | **−0.093** |
+| pallet | 0.7830 | **0.8625** | **+0.080** |
+| macro | 0.9157 | 0.8859 | — |
+
+Nota: la comparación no es perfectamente justa — with_floor usa features antiguas (15), no_floor usa features nuevas (16).
+
+**Validación visual sobre 6 escenas BBB reales:**
+- ✅ Person sobrepredicado (anillo verde) desaparece completamente
+- ✅ Pallet mejora visiblemente (esc4, esc6)
+- ✅ Threshold Y<0.05 funciona — suelo limpio sin falsos positivos en floor
+- ❌ Person real no detectada en esc4 (trade-off inaceptable para producción)
+- ⚠️ Vehicle sigue confuso — problema de geometría del mesh, no de floor/nofloor
+- ⚠️ Comparación parcialmente injusta: with_floor nunca se reentrenó con 16 features
+
+**Opciones abiertas para análisis:**
+
+| Opción | Descripción | Ventaja | Riesgo |
+|--------|-------------|---------|--------|
+| A — with_floor (baseline) | Entrenar con las 5 clases incluyendo floor | Person conservado | Tiempo training en v2, anillo puede reaparecer |
+| B — no_floor puro | Excluir floor completamente | +pallet, 4× más rápido CV | Person −9%, pierde personas reales |
+| C — floor subsampled | Incluir floor pero solo 10-20% de sus puntos (same absolute count as no_floor) | Mantiene contexto de floor sin dominar | Más complejo, sin validar |
+| D — two-stage | Clasificador binario floor/no-floor → clasificador 4-clases para no-floor | Cada modelo más simple | Doble inferencia, más complejidad de pipeline |
+| E — with_floor + cv-subsample ajustado | Entrenar con floor, reducir cv-subsample a 0.06 para compensar el 5× de datos en v2 | Sin cambios de arquitectura | CV con menos datos puede ser menos fiable |
+
+**Decisión pendiente:** analizar opciones con más profundidad antes de generar dataset v2.

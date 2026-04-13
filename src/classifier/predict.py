@@ -258,6 +258,11 @@ def main() -> None:
     parser.add_argument("--align", choices=["auto", "fusion3d", "none"], default="auto",
                         help="Coordinate alignment: auto=detect floor axis, "
                              "fusion3d=force Z-up→Y-up swap, none=skip (default: auto)")
+    parser.add_argument("--floor-threshold", type=float, default=None,
+                        metavar="Y",
+                        help="If set, points with Y < threshold are labelled floor (0) "
+                             "directly without running the classifier. Use with models "
+                             "trained with --no-floor. Typical value: 0.05")
     args = parser.parse_args()
 
     models_dir = Path(args.models_dir)
@@ -288,10 +293,22 @@ def main() -> None:
     print(f"ROI crop: {mask.sum():,} in / {n_out:,} out (outlier=255)")
 
     labels = np.full(len(pts), 255, dtype=np.uint8)
-    if mask.sum() > 0:
-        feats = extract_features(pts[mask])
+
+    # Floor threshold: label directly without classifier
+    if args.floor_threshold is not None:
+        floor_mask = mask & (pts[:, 1] < args.floor_threshold)
+        labels[floor_mask] = 0
+        classify_mask = mask & ~floor_mask
+        print(f"Floor threshold Y<{args.floor_threshold:.3f}: "
+              f"{floor_mask.sum():,} pts → label=0 (floor), "
+              f"{classify_mask.sum():,} pts → classifier")
+    else:
+        classify_mask = mask
+
+    if classify_mask.sum() > 0:
+        feats = extract_features(pts[classify_mask])
         feats_scaled = scaler.transform(feats)
-        labels[mask] = model.predict(feats_scaled).astype(np.uint8)
+        labels[classify_mask] = model.predict(feats_scaled).astype(np.uint8)
 
     label_map = payload.get("label_map", {})
     inv_map = {v: k for k, v in label_map.items()}

@@ -208,18 +208,30 @@ def main():
     parser.add_argument("--n-jobs", type=int, default=-1,
                         help="Parallelism for RF/LGBM and feature extraction "
                              "(default -1 = all cores). Use 1 for tests.")
+    parser.add_argument("--no-floor", action="store_true",
+                        help="Exclude floor points (label=0) from training and CV. "
+                             "Use together with a floor-removal step at predict time.")
     args = parser.parse_args()
 
     data_dir = Path(args.data)
     out_dir  = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    no_floor_tag = " [NO-FLOOR]" if args.no_floor else ""
     print(f"CV config: rf_cv_trees={args.cv_estimators}, "
           f"cv_subsample={args.cv_subsample:.0%}, "
-          f"final_rf_trees={args.n_estimators}", flush=True)
+          f"final_rf_trees={args.n_estimators}{no_floor_tag}", flush=True)
 
     # ── Load + scale ─────────────────────────────────────────────────────────
     X, y, groups = load_dataset(data_dir, n_jobs=args.n_jobs)
+
+    if args.no_floor:
+        mask = y != 0
+        n_removed = int((~mask).sum())
+        print(f"  --no-floor: removing {n_removed:,} floor pts "
+              f"({n_removed/len(y)*100:.1f}%) → {mask.sum():,} pts remain", flush=True)
+        X, y, groups = X[mask], y[mask], groups[mask]
+
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X).astype(np.float32)
 
