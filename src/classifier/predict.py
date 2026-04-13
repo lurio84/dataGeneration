@@ -3,11 +3,18 @@ predict.py — Run inference on any PLY file and produce a labelled PLY.
 
 Usage (from src/):
     python3 classifier/predict.py input.ply output_labeled.ply [--model rf|lgbm]
+    python3 classifier/predict.py input.ply output_labeled.ply --align none   # synthetic/already-aligned
+    python3 classifier/predict.py input.ply output_labeled.ply --align fusion3d  # force FUSION3D alignment
 
 Input PLY: ASCII or binary-LE, must have at least x y z fields.
            Optional fields (red, green, blue, label) are accepted but ignored.
 Output PLY: binary-LE with fields x y z red green blue label,
             colours taken from LABEL_RGB (same as generate_dataset.py).
+
+Coordinate alignment (--align):
+    auto      — detect floor axis automatically; swap if Z-up, translate floor→Y=0 (default)
+    fusion3d  — force FUSION3D convention (Z-up → swap Y↔Z, then translate floor→Y=0)
+    none      — no alignment (use when input is already in synthetic convention: Y-up, floor≈Y=0)
 """
 
 import argparse
@@ -21,6 +28,69 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from classifier.features import extract_features
 from generate_dataset import LABEL_RGB
+
+
+# ── Coordinate alignment (FUSION3D → synthetic convention) ───────────────────
+
+def _detect_floor_axis(pts: np.ndarray) -> int:
+    """
+    Detect which axis (0=X, 1=Y, 2=Z) contains the floor plane.
+    The floor axis has the highest histogram peak (dense flat plane).
+    In FUSION3D real data: floor axis = Z (2).
+    In synthetic data:     floor axis = Y (1).
+    """
+    best_axis, best_peak = 0, 0
+    for ax in range(3):
+        hist, _ = np.histogram(pts[:, ax], bins=100)
+        if hist.max() > best_peak:
+            best_peak = hist.max()
+            best_axis = ax
+    return best_axis
+
+
+def _detect_floor_y(pts: np.ndarray) -> float:
+    """
+    Estimate floor Y value using histogram mode of the lowest 30% of Y values.
+    """
+    vals = pts[:, 1]
+    low = np.percentile(vals, 30)
+    hist, edges = np.histogram(vals[vals < low], bins=200)
+    return float(edges[np.argmax(hist)])
+
+
+def align_to_synthetic(pts: np.ndarray, mode: str = "auto") -> tuple:
+    """
+    Align a point cloud to the synthetic coordinate convention (Y-up, floor at Y=0).
+
+    Parameters
+    ----------
+    pts  : (N, 3) float32 — input xyz
+    mode : 'auto' | 'fusion3d' | 'none'
+
+    Returns
+    -------
+    pts_aligned : (N, 3) float32
+    info        : dict with 'floor_axis', 'y_offset' applied (for logging)
+    """
+    if mode == "none":
+        return pts, {"floor_axis": 1, "y_offset": 0.0, "swapped": False}
+
+    floor_ax = _detect_floor_axis(pts)
+
+    if mode == "fusion3d" or (mode == "auto" and floor_ax != 1):
+        # Swap so floor_ax → Y (index 1)
+        other = [i for i in range(3) if i != floor_ax]
+        pts = pts[:, [other[0], floor_ax, other[1]]].copy()
+        swapped = True
+    else:
+        swapped = False
+
+    # Translate floor to Y=0
+    y_offset = _detect_floor_y(pts)
+    pts = pts.copy()
+    pts[:, 1] -= y_offset
+
+    return pts, {"floor_axis": floor_ax, "y_offset": y_offset, "swapped": swapped}
 
 
 # ── PLY reader (ASCII + binary-LE, generic field discovery) ──────────────────
@@ -165,6 +235,9 @@ def main() -> None:
                         help="Which model to use (default: rf)")
     parser.add_argument("--models-dir", default="../models",
                         help="Directory with saved .pkl files")
+    parser.add_argument("--align", choices=["auto", "fusion3d", "none"], default="auto",
+                        help="Coordinate alignment: auto=detect floor axis, "
+                             "fusion3d=force Z-up→Y-up swap, none=skip (default: auto)")
     args = parser.parse_args()
 
     models_dir = Path(args.models_dir)
@@ -180,6 +253,14 @@ def main() -> None:
 
     pts = read_ply_xyz(Path(args.input))
     print(f"Loaded {len(pts):,} points from {args.input}")
+
+    pts, align_info = align_to_synthetic(pts, mode=args.align)
+    if align_info["swapped"] or align_info["y_offset"] != 0.0:
+        print(f"Alignment: floor_axis={align_info['floor_axis']} "
+              f"({'swapped Y↔Z' if align_info['swapped'] else 'no swap'}), "
+              f"Y translated by {-align_info['y_offset']:+.3f}m → floor at Y=0")
+    else:
+        print("Alignment: none (already Y-up, floor≈Y=0)")
 
     feats = extract_features(pts)
     feats_scaled = scaler.transform(feats)
