@@ -1,7 +1,7 @@
 """
 features.py — Per-point feature extraction for the 5-class ML classifier.
 
-16 geometric features per point using a k-NN neighbourhood (cKDTree + PCA).
+17 geometric features per point using a k-NN neighbourhood (cKDTree + PCA).
 All features are float32.
 
 Positional features dist_xz and dist_centroid_xz have been intentionally
@@ -19,31 +19,83 @@ from scipy.spatial import cKDTree
 
 
 FEATURE_NAMES: list[str] = [
-    "y",                  # 0  absolute height (critical: floor@0, pallet@0.144)
-    "y_norm",             # 1  relative height in scene
-    "z",                  # 2  depth — proxy for sensor noise level
-    "local_density",      # 3  point count within radius 0.15 m
-    "nbr_y_mean",         # 4  mean Y of k neighbours
-    "nbr_y_std",          # 5  std  Y of k neighbours (local roughness)
-    "height_range_local", # 6  max-min Y within neighbourhood
-    "normal_y",           # 7  Y-component of estimated surface normal
-    "curvature",          # 8  λ3 / (λ1+λ2+λ3)
-    "planarity",          # 9  (λ2−λ3) / λ1   [k=20]
-    "linearity",          # 10 (λ1−λ2) / λ1   [k=20]
-    "sphericity",         # 11 λ3 / λ1
-    "verticality",        # 12 |normal_y|
-    "normal_y_std",       # 13 std of normal_y across k neighbours — surface regularity
-    "lam_ratio_12",       # 14 λ1 / λ2 — elongation: high for needles/arms, ~1 for planes
-    "planarity_large",    # 15 (λ2−λ3) / λ1  at k=50 — macro-scale flatness
+    "y",                        # 0  absolute height (critical: floor@0, pallet@0.144)
+    "y_norm",                   # 1  relative height in scene
+    "z",                        # 2  depth — proxy for sensor noise level
+    "local_density",            # 3  point count within radius 0.15 m
+    "nbr_y_mean",               # 4  mean Y of k neighbours
+    "nbr_y_std",                # 5  std  Y of k neighbours (local roughness)
+    "height_range_local",       # 6  max-min Y within neighbourhood
+    "normal_y",                 # 7  Y-component of estimated surface normal
+    "curvature",                # 8  λ3 / (λ1+λ2+λ3)
+    "planarity",                # 9  (λ2−λ3) / λ1   [k=20]
+    "linearity",                # 10 (λ1−λ2) / λ1   [k=20]
+    "sphericity",               # 11 λ3 / λ1
+    "verticality",              # 12 |normal_y|
+    "normal_y_std",             # 13 std of normal_y across k neighbours — surface regularity
+    "lam_ratio_12",             # 14 λ1 / λ2 — elongation: high for needles/arms, ~1 for planes
+    "planarity_large",          # 15 (λ2−λ3) / λ1  at k=50 — macro-scale flatness
+    "height_above_local_floor", # 16 Y minus estimated floor Y in local 0.5 m XZ cell
 ]
 
-_N_FEATURES = len(FEATURE_NAMES)   # 16
+_N_FEATURES = len(FEATURE_NAMES)   # 17
 
 # Default neighbourhood parameters — exposed as constants so callers can reference them
 # without hard-coding the numbers (e.g. for documentation or validation).
 K_NEIGHBORS: int = 20         # k nearest neighbours for local PCA / stats
 K_LARGE: int = 50             # k for macro-scale PCA (planarity_large)
 LOCAL_RADIUS_M: float = 0.15  # search radius for local_density [metres]
+FLOOR_CELL_SIZE_M: float = 0.5  # XZ cell side for local floor estimation [metres]
+
+
+def _height_above_local_floor(pts: np.ndarray) -> np.ndarray:
+    """
+    Estimate local floor height per XZ grid cell and return per-point height above it.
+
+    Algorithm (vectorised, no per-point Python loops):
+      1. Assign each point to a 0.5 m × 0.5 m XZ cell.
+      2. Sort points by cell id; compute median Y per contiguous cell slice.
+      3. Map cell medians back to each point; subtract from pts[:,1].
+
+    Fallback: global median Y for degenerate single-cell or empty scenes.
+
+    Returns float32 array of shape (N,).
+    """
+    x = pts[:, 0]
+    y = pts[:, 1]
+    z = pts[:, 2]
+
+    # Integer cell indices
+    ix = np.floor(x.astype(np.float64) / FLOOR_CELL_SIZE_M).astype(np.int64)
+    iz = np.floor(z.astype(np.float64) / FLOOR_CELL_SIZE_M).astype(np.int64)
+
+    # Encode (ix, iz) as a single int64.  Safe for scenes ≤ ~1e9 cells wide.
+    cell_code = ix * 1_000_003 + iz
+
+    # Sort by cell so each cell occupies a contiguous slice — O(N log N)
+    sort_order = np.argsort(cell_code, kind="stable")
+    sorted_codes = cell_code[sort_order]
+    sorted_y = y[sort_order]
+
+    # Cell boundaries
+    boundaries = np.flatnonzero(np.diff(sorted_codes)) + 1
+    cell_starts = np.concatenate([[0], boundaries])
+    cell_ends = np.concatenate([boundaries, [len(y)]])
+
+    global_floor_y = float(np.median(y))
+
+    # Per-cell median — loop is O(n_cells), not O(N)
+    floor_y_sorted = np.empty(len(y), dtype=np.float32)
+    for s, e in zip(cell_starts, cell_ends):
+        med = float(np.median(sorted_y[s:e])) if e > s else global_floor_y
+        floor_y_sorted[s:e] = med
+
+    # Unsort: restore original point order
+    unsort_order = np.empty_like(sort_order)
+    unsort_order[sort_order] = np.arange(len(y), dtype=sort_order.dtype)
+    floor_y = floor_y_sorted[unsort_order]
+
+    return (y - floor_y).astype(np.float32)
 
 
 def _pca_features(pts: np.ndarray, idx: np.ndarray) -> tuple:
@@ -73,7 +125,7 @@ def extract_features(
     radius: float = LOCAL_RADIUS_M,
 ) -> np.ndarray:
     """
-    Extract 16 per-point geometric features.
+    Extract 17 per-point geometric features.
 
     Parameters
     ----------
@@ -84,7 +136,7 @@ def extract_features(
 
     Returns
     -------
-    feats : (N, 16) float32 array, columns match FEATURE_NAMES
+    feats : (N, 17) float32 array, columns match FEATURE_NAMES
     """
     pts = np.asarray(pts, dtype=np.float32)
     N = len(pts)
@@ -151,5 +203,8 @@ def extract_features(
     lam1_l, lam2_l, lam3_l, _ = _pca_features(pts, idx_large)
     lam1_l_safe = np.where(lam1_l < 1e-10, 1e-10, lam1_l)
     feats[:, 15] = (lam2_l - lam3_l) / lam1_l_safe    # planarity_large
+
+    # ── Local floor height (XZ grid, 0.5 m cells) ───────────────────────────
+    feats[:, 16] = _height_above_local_floor(pts)      # height_above_local_floor
 
     return feats
