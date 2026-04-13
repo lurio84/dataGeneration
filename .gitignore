@@ -38,3 +38,6 @@ output/
 
 # Trained model files (too large to version)
 models/*.pkl
+
+# Prediction results (regenerable with predict.py)
+predictions/*.ply
