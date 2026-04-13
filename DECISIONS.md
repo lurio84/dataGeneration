@@ -126,7 +126,7 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
 
 **Estado: ✅ Dataset v1 generado (2026-04-10) — listo para revisión con Paula**
 
-- **Dataset v1 (validación):** 100 escenas iniciales, seed=42. `output/dataset/` acumula actualmente 139 PLYs de iteraciones previas.
+- **Dataset v1 (validación):** 100 escenas, seed=42, `output/dataset/` (regenerado limpio 2026-04-13 — ver §14).
 - **CFG activo para dataset v2:**
   | Parámetro | v1 | v2 | Justificación cambio |
   |---|---|---|---|
@@ -146,8 +146,7 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
   | Puntos/escena | 64k | 235k ROI | ℹ️ ver §7 |
 - **Distribución de labels:**
   floor 72.9% · vehicle 9.4% · cargo 8.6% · pallet 5.0% · outlier 2.9% · person 1.3%
-- **Metadatos:** `results/metadata_v1.json` (PLYs excluidos de git por .gitignore).
-- **Previews:** 100 PNG en `output/previews/` (excluidos de git).
+- **Metadatos:** `output/dataset/metadata.json` (auto-generado por generate_dataset.py, PLYs excluidos de git por .gitignore).
 - **Pendiente (dataset definitivo ≥500 escenas):**
   - Validación oclusión/reflexiones con Paula (§7)
   - Decidir si añadir techo/paredes para igualar point count real
@@ -289,10 +288,16 @@ Retrain full dataset (6.25M pts): RF 300 trees → 1864s, LGBM → 72s. Tamaños
 - [x] Features rediseñadas — eliminados dist_xz + dist_centroid_xz, añadidos 3 nuevas (2026-04-13)
 - [x] Meshes reales — pallet 5 tablones, traspaleta cuerpo bajo + horcas planas + timón en U (2026-04-13)
 - [x] A1 — cargo-on-vehicle: compose_cargo_on_vehicle, p_pallet=0.80, p_cargo_on_vehicle=0.50 (2026-04-13)
-- [ ] **Decidir estrategia no-floor para v2** — ver §12 para análisis completo
-- [ ] Dataset v2 ≥500 escenas — Paula OK obtenido, pendiente tras decisión §12
-- [ ] Retrain RF+LGBM sobre dataset v2 con 16 features
-- [ ] Validación visual post-retrain sobre 6 escenas BBB (comparar con output/fase0/)
+- [x] **Decidir estrategia floor para v2** — con_suelo (ver §13, cerrado 2026-04-13)
+- [x] Dataset v1 regenerado limpio (100 escenas, CFG actual, 2026-04-13) — ver §14
+- [x] Feature 17 `height_above_local_floor` añadida (2026-04-13)
+- [x] Flags training: `--floor-subsample`, `--class-weight-mult`, `--max-samples-rf`, `--lgbm-only-cv`
+- [x] `scripts/bench_training.py` — comparador 2 configs LGBM-only CV
+- [ ] **Fase 1.7 — Retrain sobre v1 limpio + validación visual BBB** (siguiente paso, ver plan `floofy-rolling-pumpkin.md`)
+- [ ] Re-correr bench sobre v1 limpio para confirmar F1 vs históricos 0.89
+- [ ] Dataset v2 ≥500 escenas — Paula OK, pendiente tras Fase 1.7
+- [ ] Retrain RF+LGBM sobre dataset v2 con 17 features + flags optimización
+- [ ] Validación visual post-retrain v2 sobre 6 escenas BBB
 
 ---
 
@@ -339,4 +344,77 @@ Nota: la comparación no es perfectamente justa — with_floor usa features anti
 | D — two-stage | Clasificador binario floor/no-floor → clasificador 4-clases para no-floor | Cada modelo más simple | Doble inferencia, más complejidad de pipeline |
 | E — with_floor + cv-subsample ajustado | Entrenar con floor, reducir cv-subsample a 0.06 para compensar el 5× de datos en v2 | Sin cambios de arquitectura | CV con menos datos puede ser menos fiable |
 
-**Decisión pendiente:** analizar opciones con más profundidad antes de generar dataset v2.
+**Decisión cerrada (2026-04-13):** **Opción A — with_floor**. Ver §13 para el bench honesto que sentenció la decisión.
+
+---
+
+## 13. Bench floor sí/no + decisión final (2026-04-13)
+
+**Estado: ✅ Decidido — entrenar CON suelo.**
+
+### Infra nueva añadida (commit `a7e82a6`)
+
+- **Feature 17** `height_above_local_floor` (`features.py`): mediana de Y por celda XZ 0.5 m. Motivación: desacoplar información de altura del volumen de puntos floor en training.
+- **4 flags nuevos en `train.py`**, todos con defaults que preservan comportamiento anterior:
+  - `--floor-subsample contextual:F,bulk:F` — KDTree non-floor → mask contextual/bulk.
+  - `--class-weight-mult person:2,pallet:2` — sample_weight encima de `balanced`.
+  - `--max-samples-rf N` — cap en bootstrap de RF para evitar OOM en retrain v2.
+  - `--lgbm-only-cv` — salta CV de RF (5-10× speedup).
+- **`scripts/bench_training.py`** — compara 2 configs sobre mismo dataset con load+features cacheados, LGBM-only CV, escribe CSV.
+
+### Bench 1 — 139 escenas contaminadas (dirty)
+
+Ejecutado sobre mix de 100 v1 oficiales + 39 legacy de iteraciones previas con CFG desconocida. Resultados en `results/bench_v1_dirty139.csv`.
+
+| Métrica | A_baseline (with_floor) | C_contextual (floor:0.1 bulk) | Δ |
+|---|---|---|---|
+| F1-macro | 0.8405 | 0.8151 | **−0.025** |
+| F1-cargo | 0.9272 | 0.9072 | −0.020 |
+| F1-vehicle | 0.6738 | 0.6184 | **−0.055** |
+| F1-person | 0.8134 | 0.8222 | +0.009 |
+| F1-pallet | 0.8198 | 0.7825 | **−0.037** |
+| CV time (s) | 216.1 | 128.6 | −87.5 (1.7× más rápido) |
+| RAM real (`/usr/bin/time -v`) | — | 4.3 GB peak | — |
+
+### Lecciones del bench
+
+1. **C no renta.** Intercambia 87s de CV por −0.025 de F1-macro, con pallet y vehicle como grandes perdedores. Person apenas mejora.
+2. **La intuición "70% de puntos = 70% del tiempo" es falsa.** En árboles (LGBM/RF) el tiempo lo gasta el boundary difícil, no el volumen homogéneo. Floor es trivial de separar (un split en Y<0.1 y listo); no itera sobre esos puntos. El ahorro real al quitar suelo es modesto y se paga con F1.
+3. **El OOM en retrain v2 NO lo resuelve floor subsampling** — lo resuelve `--max-samples-rf 2000000`, que es ortogonal al floor.
+4. **tracemalloc subestima RAM** (reportó 2.3 GB mientras el proceso real usaba 4.3 GB según `time -v`). No usar para decidir OOM.
+5. **Las F1 absolutas estaban bajas** (person 0.81 vs histórico 0.94) — contaminación por 39 escenas legacy, no fallo de features. Ver §14.
+
+### Decisión final
+
+- **Estrategia floor v2:** **Opción A — with_floor, sin subsampling.** El default `--floor-subsample none` queda como definitivo.
+- **Speedup v2:** por `--lgbm-only-cv` + `--max-samples-rf 2000000` + `--cv-subsample 0.10`. Proyección: retrain v2 (500 escenas, ~30M pts) en ~40-50 min, sin OOM.
+- **Class weights:** `--class-weight-mult person:2,pallet:2` activo en v2 para proteger las minoritarias.
+- **Feature 17:** se queda. El test unitario confirma que el algoritmo es correcto; puede aportar en v2 aunque en v1 contaminado no desplazó el F1.
+
+### Nueva memoria registrada
+
+`feedback_tree_training_cost.md` (type: feedback) — "Para clasificadores de árboles (RF/LGBM), el tiempo de training NO es proporcional a la fracción de puntos por clase; es proporcional a la dificultad del boundary. Reducir clases homogéneas como floor (77%) ahorra menos tiempo del que parece y suele costar F1 en clases vecinas."
+
+---
+
+## 14. Limpieza dataset v1 (2026-04-13)
+
+**Estado: ✅ Ejecutado.**
+
+**Problema detectado durante el bench:** `output/dataset/` acumulaba **139 PLYs** — mix de 100 v1 oficiales (2026-04-10) + 39 legacy de iteraciones previas con CFG desconocida (meshes antiguos, posible distinta estadística de ruido). El clasificador entrenaba sobre dos distribuciones a la vez, explicando la caída de 0.05 en F1-macro vs histórico (0.84 actual vs 0.89 §11).
+
+**Acción:**
+1. Regeneración limpia de 100 escenas con CFG actual (`n_samples=100, seed=42, noise=0.035, voxel=0.019, p_pallet=0.80, p_cargo_on_vehicle=0.50, p_person=0.30`).
+2. `output/dataset/` (139 legacy) borrado.
+3. `output/dataset_v1_clean/` → renombrado a `output/dataset/` (path canónico).
+4. `output/dataset/metadata.json` (100 entradas, auto-generado).
+5. Residuales borrados: `output/a1_preview/`, `output/analysis/`, `output/fase0/`, `output/train_*.log`, `results/metadata_v1.json` (stale), `__pycache__`, `.pytest_cache`.
+6. Bench contaminado preservado: `results/bench_v1_dirty139.{csv,log}` (histórico).
+
+**Estado final del repo:**
+- `output/dataset/` — 100 PLYs limpios (96 MB) + `metadata.json`
+- `output/classifier_eval/` — plots históricos (~124 KB)
+- `results/` — solo `bench_v1_dirty139.{csv,log}`
+- Sin modelos entrenados aún (todos los `.pkl` borrados en Fase 0 del plan)
+
+**Siguiente paso:** re-correr bench sobre v1 limpio para medir F1 honesto (debería estar cerca del 0.89 histórico de §11 LGBM). Si matchea → Fase 1.7 (retrain + validación visual BBB). Si no matchea → investigar features (eliminación de `dist_xz` sin reemplazo equivalente puede haber dolido más de lo pensado).
