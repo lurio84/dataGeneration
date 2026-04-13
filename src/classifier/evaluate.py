@@ -32,7 +32,8 @@ CLASS_NAMES = list(LABEL.keys())  # ['floor','cargo','vehicle','person','pallet'
 CLASS_IDS = list(LABEL.values())
 
 
-def _plot_confusion_matrix(cm_norm, title, out_path):
+def _plot_confusion_matrix(cm_norm: np.ndarray, title: str, out_path: "Path") -> None:
+    """Save a normalised 5×5 confusion matrix as a PNG heatmap."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -59,7 +60,8 @@ def _plot_confusion_matrix(cm_norm, title, out_path):
     print(f"  Saved: {out_path}")
 
 
-def _plot_feature_importance(rf_model, out_path):
+def _plot_feature_importance(rf_model, out_path: "Path") -> None:
+    """Save a horizontal bar chart of RF feature importances (mean decrease in impurity)."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -102,7 +104,26 @@ def _plot_comparison(results: dict, out_path):
     print(f"  Saved: {out_path}")
 
 
-def evaluate_model(model_name: str, data_dir: Path, models_dir: Path, out_dir: Path):
+def evaluate_model(
+    model_name: str,
+    data_dir: Path,
+    models_dir: Path,
+    out_dir: Path,
+) -> "dict | None":
+    """
+    Run scene-level 5-fold CV on a saved classifier and save evaluation plots.
+
+    Parameters
+    ----------
+    model_name : 'rf' or 'lgbm'
+    data_dir   : directory with labelled PLY files (the training dataset)
+    models_dir : directory containing classifier_{model_name}.pkl
+    out_dir    : where to save confusion matrix and feature importance PNGs
+
+    Returns
+    -------
+    dict with 'f1_macro' key, or None if the model file is missing.
+    """
     model_path = models_dir / f"classifier_{model_name}.pkl"
     if not model_path.exists():
         print(f"  Model not found: {model_path}. Skipping.", file=sys.stderr)
@@ -162,16 +183,19 @@ def evaluate_model(model_name: str, data_dir: Path, models_dir: Path, out_dir: P
     return {"f1_macro": f1_mac}
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate 5-class classifier")
     parser.add_argument("--model", choices=["rf", "lgbm", "both"], default="both")
-    parser.add_argument("--data", default="../output/dataset")
+    parser.add_argument("--data", "--dataset-dir", default="../output/dataset",
+                        dest="data", help="Directory with labelled PLY files (default: %(default)s)")
+    parser.add_argument("--output-dir", default="../output/classifier_eval",
+                        help="Where to save evaluation plots (default: %(default)s)")
     parser.add_argument("--models-dir", default="../models")
     args = parser.parse_args()
 
     data_dir = Path(args.data)
     models_dir = Path(args.models_dir)
-    out_dir = Path("../output/classifier_eval")
+    out_dir = Path(args.output_dir)
 
     models_to_eval = ["rf", "lgbm"] if args.model == "both" else [args.model]
     results = {}

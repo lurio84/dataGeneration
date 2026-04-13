@@ -32,11 +32,16 @@ FEATURE_NAMES: list[str] = [
 
 _N_FEATURES = len(FEATURE_NAMES)   # 15
 
+# Default neighbourhood parameters — exposed as constants so callers can reference them
+# without hard-coding the numbers (e.g. for documentation or validation).
+K_NEIGHBORS: int = 20         # k nearest neighbours for local PCA / stats
+LOCAL_RADIUS_M: float = 0.15  # search radius for local_density [metres]
+
 
 def extract_features(
     pts: np.ndarray,
-    k: int = 20,
-    radius: float = 0.15,
+    k: int = K_NEIGHBORS,
+    radius: float = LOCAL_RADIUS_M,
 ) -> np.ndarray:
     """
     Extract 15 per-point geometric features.

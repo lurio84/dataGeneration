@@ -250,19 +250,33 @@ Feature extraction: 6.25M pts en 15.4s con 16 threads.
 
 | Clase | RF F1 | LGBM F1 |
 |-------|-------|---------|
-| floor | 0.9843 | — |
-| cargo | 0.9541 | — |
-| vehicle | 0.8688 | — |
-| person | 0.9886 | — |
-| pallet | 0.7830 | — |
-| **macro** | **0.9157** | **—** |
+| floor | 0.9843 | 0.9755 |
+| cargo | 0.9541 | 0.9495 |
+| vehicle | 0.8688 | 0.8399 |
+| person | 0.9886 | 0.9417 |
+| pallet | 0.7830 | 0.7489 |
+| **macro** | **0.9157** | **0.8911** |
 
 RF folds: 0.9123 / 0.9194 / 0.9193 / 0.9134 / 0.9142 (σ=0.003, muy estable).
-Nota: `pallet` es la clase más difícil — superficie plana baja, geométricamente similar al suelo. `class_weight='balanced'` compensa la baja frecuencia de `person` (1.4%) con éxito (F1=0.9886).
-LGBM CV y retrain final pendientes — relanzar con `cd src && python3 -u classifier/train.py`.
+LGBM folds: 0.8999 / 0.9053 / 0.8687 / 0.8863 / 0.8951 (σ=0.013, más varianza que RF).
+Nota: `pallet` es la clase más difícil en ambos modelos — superficie plana baja, geométricamente similar al suelo. RF supera LGBM en todas las clases; se usará RF como modelo principal. `class_weight='balanced'` compensa la baja frecuencia de `person` (1.4%) con éxito en ambos.
+Retrain full dataset (6.25M pts): RF 300 trees → 1864s, LGBM → 72s. Tamaños: classifier_rf.pkl=1.9G, classifier_lgbm.pkl=3.4M.
 
 ### Evaluación real V2 (pendiente post-Paula)
 
 - Dataset v1 entrenado sobre sintético calibrado (§8).
-- Validación cualitativa V1: `predict.py` sobre `logicarc_cargo_segmentation/colored_clouds/` (28 PLYs reales, etiquetado binario cargo/no-cargo) → comparar label=1 predicho con zona verde del GT.
-- V2: re-etiquetar ≥5 escenas reales con 5 clases (Paula + usuario) → test set formal con métricas reales por clase.
+- **Validación cualitativa V1 — resultado (2026-04-13):** `predict.py` sobre `logicarc_cargo_segmentation/colored_clouds/T01_centro_bulto_grande_colored.ply` → FALLO: 69% clasificado como person, 0% como cargo. **Causa identificada:** las colored_clouds son crops pre-segmentados (1,595 pts, Y∈[-0.27, 1.15m]), no escenas completas. El clasificador espera escenas enteras con suelo en Y=0 y contexto 5×4m — los features posicionales (`dist_xz`, `y`, `z`, `dist_centroid_xz`) son incoherentes sobre un crop.
+- **Conclusión:** `predict.py` requiere PLYs de escena completa en el sistema de coordenadas del sensor (suelo en Y≈0, cámaras en Z≈0). El top-5 de features por importancia RF son todos posicionales → el modelo es frágil a shifts de coordenadas.
+- **Fix necesario para inferencia real:** o bien normalizar el PLY de entrada al mismo sistema de coordenadas (detectar suelo con RANSAC → alinear Y=0), o bien re-diseñar features puramente geométricas/locales (sin `y` absoluto ni `dist_xz`).
+- **evaluate.py — OOM con RF:** re-entrenar 5 folds × 300 árboles RF sobre 6.25M pts excede la RAM. Workaround: `--model lgbm` para confusion matrix; feature importance RF generado desde pkl guardado (sin re-entrenamiento).
+- V2: re-etiquetar ≥5 escenas reales **completas** con 5 clases (Paula + usuario) → test set formal con métricas reales por clase.
+
+---
+
+## Pendiente
+
+- [x] Rellenar columna LGBM en tabla §11 con F1 por clase (2026-04-13)
+- [x] `evaluate.py` → confusion matrix LGBM + feature importance RF en `output/classifier_eval/` (RF CV omitido: OOM, ver §11 evaluación real V2)
+- [x] `predict.py` → validación sobre T01 — FALLO por input incorrecto (crop vs escena completa), ver §11 evaluación real V2
+- [ ] Commit rama developLucas (Track B + B9 + CLAUDE.md + §11 resultados + hallazgos evaluate/predict)
+- [ ] Dataset ≥500 escenas — **coordinar con Paula antes de generar**

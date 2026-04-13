@@ -159,7 +159,15 @@ cd src/
 python3 -m pytest test_pipeline.py -v
 ```
 
-70 tests covering geometry, PLY output, scene composition (single/stacked/tandem), flat-cargo mode, sensor degradation, previews, and UI defaults.
+87 tests covering geometry, PLY output, scene composition (single/stacked/tandem), flat-cargo mode, sensor degradation, previews, UI defaults, and 5-class ML classifier (features, training, inference).
+
+```bash
+cd src/
+# Pipeline tests only
+python3 -m pytest test_pipeline.py -v
+# All tests with coverage
+python3 -m pytest test_pipeline.py test_classifier.py -v --cov=. --cov-report=html:../htmlcov
+```
 
 ## Statistical analysis vs real data
 
@@ -172,6 +180,50 @@ python3 analyze.py
 ```
 
 Saves 7 figures to `output/analysis/`.
+
+## 5-class per-point ML Classifier (§11)
+
+Trains on the synthetic dataset and labels any PLY with 5 semantic classes:
+`floor` (0) · `cargo` (1) · `vehicle` (2) · `person` (3) · `pallet` (4) · `outlier` (255)
+
+### Train
+
+```bash
+cd src/
+python3 classifier/train.py \
+    [--data ../output/dataset] [--out ../models] \
+    [--cv-estimators 100] [--cv-subsample 0.3] [--n-jobs -1]
+```
+
+Runs scene-level 5-fold CV for RandomForest and LightGBM, then retrains both on the full dataset.
+Saves `models/classifier_rf.pkl` and `models/classifier_lgbm.pkl`.
+
+| Model | CV F1-macro |
+|---|---|
+| RandomForest (300 trees) | 0.9157 |
+| LightGBM | pending |
+
+Per-class F1 (RF): floor 0.9843 · cargo 0.9541 · vehicle 0.8688 · person 0.9886 · pallet 0.7830
+
+### Predict
+
+```bash
+cd src/
+python3 classifier/predict.py input.ply output_labeled.ply [--model lgbm]
+```
+
+Accepts ASCII or binary PLY. Outputs binary-LE PLY with `x y z red green blue label` fields.
+
+### Evaluate (confusion matrix + feature importance)
+
+```bash
+cd src/
+python3 classifier/evaluate.py \
+    --dataset-dir ../output/dataset \
+    --output-dir ../output/classifier_eval
+```
+
+Saves normalised confusion matrices, F1 per class, feature importance plot, and RF vs LightGBM comparison.
 
 ## Coordinate system
 

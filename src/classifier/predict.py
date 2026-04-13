@@ -157,7 +157,7 @@ def write_labeled_ply(path: Path, pts: np.ndarray, labels: np.ndarray) -> None:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Per-point 5-class prediction")
     parser.add_argument("input",  help="Input PLY file (ASCII or binary)")
     parser.add_argument("output", help="Output labelled PLY file (binary-LE)")

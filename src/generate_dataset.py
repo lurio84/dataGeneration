@@ -19,10 +19,13 @@ Output per scene
 
 import os
 import json
+import logging
 from pathlib import Path
 
 import numpy as np
 import open3d as o3d
+
+log = logging.getLogger(__name__)
 
 if os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland":
     os.environ["XDG_SESSION_TYPE"] = "x11"
@@ -90,184 +93,37 @@ CFG = {
     "pts_person":    30_000,
 }
 
-LABEL = {"floor": 0, "cargo": 1, "vehicle": 2, "person": 3, "pallet": 4}
+# ── Submodule imports (B9 refactor) ───────────────────────────────────────────
+from ply_io.ply import (
+    LABEL, LABEL_RGB, labels_to_rgb, save_ply,
+)
+from geometry.meshes import (
+    EUR_W, EUR_H, EUR_D,
+    make_pallet_mesh, make_box_mesh, make_cylinder_mesh,
+    make_primitive_mesh, make_person_mesh, make_pallet_jack_mesh, load_forklift,
+)
+from geometry.composition import (
+    _spec_w, _spec_d, sample_cargo_spec, compose_cargo,
+)
+from sensor.noise import (
+    sample_labeled, sample_floor,
+    camera_arc_filter, apply_distance_density, degrade_labeled,
+)
 
-# EUR pallet dimensions (m)
-EUR_W, EUR_H, EUR_D = 1.20, 0.144, 0.80
+# ── Re-exports (backwards compat for test_pipeline.py and other importers) ────
+__all__ = [
+    "CFG",
+    "LABEL", "LABEL_RGB",
+    "EUR_W", "EUR_H", "EUR_D",
+    "make_pallet_mesh", "make_box_mesh", "make_cylinder_mesh",
+    "make_primitive_mesh", "make_person_mesh", "make_pallet_jack_mesh", "load_forklift",
+    "_spec_w", "_spec_d", "sample_cargo_spec", "compose_cargo",
+    "sample_labeled", "sample_floor",
+    "camera_arc_filter", "apply_distance_density", "degrade_labeled",
+    "labels_to_rgb", "save_ply",
+    "generate_scene", "run_generation", "parse_args",
+]
 
-
-# ── Geometry helpers ───────────────────────────────────────────────────────────
-
-def make_pallet_mesh() -> o3d.geometry.TriangleMesh:
-    """Standard EUR pallet: 1200×144×800 mm, centred on XZ at Y=0."""
-    m = o3d.geometry.TriangleMesh.create_box(EUR_W, EUR_H, EUR_D)
-    m.translate([-EUR_W / 2, 0.0, -EUR_D / 2])
-    return m
-
-
-def make_box_mesh(w: float, h: float, d: float) -> o3d.geometry.TriangleMesh:
-    """Axis-aligned box centred in X and Z, bottom face at Y=0."""
-    m = o3d.geometry.TriangleMesh.create_box(w, h, d)
-    m.translate([-w / 2, 0.0, -d / 2])
-    return m
-
-
-def make_cylinder_mesh(r: float, h: float) -> o3d.geometry.TriangleMesh:
-    """Upright cylinder centred in XZ, bottom face at Y=0.
-    Open3D create_cylinder is Z-aligned by default → rotate 90° around X to make it Y-aligned.
-    """
-    m = o3d.geometry.TriangleMesh.create_cylinder(radius=r, height=h, resolution=32)
-    R = np.array([[1, 0,  0],
-                  [0, 0, -1],
-                  [0, 1,  0]], dtype=np.float64)
-    m.rotate(R, center=(0.0, 0.0, 0.0))
-    # After rotation cylinder spans Y=-h/2..+h/2 → translate up so bottom sits on Y=0
-    m.translate([0.0, h / 2, 0.0])
-    return m
-
-
-def _spec_w(spec: dict) -> float:
-    """X-width of a primitive spec (box→w, cylinder→2r)."""
-    return spec.get("w", spec.get("r", 0.0) * 2)
-
-
-def _spec_d(spec: dict) -> float:
-    """Z-depth of a primitive spec (box→d, cylinder→2r)."""
-    return spec.get("d", spec.get("r", 0.0) * 2)
-
-
-def make_primitive_mesh(spec: dict) -> o3d.geometry.TriangleMesh:
-    """Create mesh from a cargo spec dict. Bottom at Y=0, centred in XZ."""
-    t = spec["type"]
-    if t == "box":
-        return make_box_mesh(spec["w"], spec["h"], spec["d"])
-    if t == "cylinder":
-        return make_cylinder_mesh(spec["r"], spec["h"])
-    raise ValueError(f"Unknown primitive type: {t!r}")
-
-
-def sample_cargo_spec(
-    cfg: dict, rng,
-    max_w: float = None,
-    max_d: float = None,
-    max_h: float = None,
-) -> dict:
-    """Sample a single cargo primitive spec (box or cylinder).
-
-    max_w / max_d: upper-bound clamps on X-width / Z-depth (stacked mode: secondary ≤ primary).
-    max_h: upper-bound clamp on height (flat-cargo mode: very low / almost-floor-level).
-    """
-    flat_min = cfg.get("flat_min_h", 0.03)  # minimum height used only in flat-cargo mode
-    if rng.random() < cfg.get("p_cylinder", 0.0):
-        # Cylinder footprint is 2r × 2r — respect max_w / max_d so the upper cylinder
-        # never exceeds the lower cargo footprint (stability constraint in stacked mode).
-        if max_w is not None or max_d is not None:
-            max_dim = min(
-                max_w if max_w is not None else float("inf"),
-                max_d if max_d is not None else float("inf"),
-            )
-            r_max = min(cfg["cyl_max_r"], max_dim / 2)
-        else:
-            r_max = cfg["cyl_max_r"]
-        r_max = max(cfg["cyl_min_r"], r_max)
-        if max_h is not None:
-            h_lo, h_hi = flat_min, max(flat_min, min(cfg["cyl_max_h"], max_h))
-        else:
-            h_lo, h_hi = cfg["cyl_min_h"], cfg["cyl_max_h"]
-        return {
-            "type": "cylinder",
-            "r": float(rng.uniform(cfg["cyl_min_r"], r_max)),
-            "h": float(rng.uniform(h_lo, h_hi)),
-        }
-    w_max = min(cfg["box_max_w"], max_w) if max_w is not None else cfg["box_max_w"]
-    d_max = min(cfg["box_max_d"], max_d) if max_d is not None else cfg["box_max_d"]
-    if max_h is not None:
-        h_lo, h_hi = flat_min, max(flat_min, min(cfg["box_max_h"], max_h))
-    else:
-        h_lo, h_hi = cfg["box_min_h"], cfg["box_max_h"]
-    return {
-        "type": "box",
-        "w": float(rng.uniform(cfg["box_min_w"], max(cfg["box_min_w"], w_max))),
-        "h": float(rng.uniform(h_lo, h_hi)),
-        "d": float(rng.uniform(cfg["box_min_d"], max(cfg["box_min_d"], d_max))),
-    }
-
-
-def compose_cargo(
-    specs: list,
-    mode,           # "stacked" | "tandem" | None
-    pallet_top_y: float,
-    rng,
-) -> tuple:
-    """Position 1 or 2 cargo primitives and return positioned meshes.
-
-    Modes
-    -----
-    stacked : secondary cargo placed on top of primary (Y direction).
-    tandem  : secondary cargo placed in front of or behind primary (Z direction).
-              Keeps cargo within the pallet footprint — no X-axis spread.
-
-    Returns
-    -------
-    items : list of (positioned_mesh, placed_spec_dict)
-        placed_spec_dict is the original spec augmented with ox/oy/oz keys.
-    cargo_back_z : float
-        Most negative Z extent across all items — used to anchor the jack.
-    """
-    if len(specs) == 1 or mode is None:
-        spec = specs[0]
-        mesh = make_primitive_mesh(spec)
-        mesh.translate([0.0, pallet_top_y, 0.0])
-        placed = {**spec, "ox": 0.0, "oy": round(pallet_top_y, 4), "oz": 0.0}
-        return [(mesh, placed)], -_spec_d(spec) / 2
-
-    spec1, spec2 = specs[0], specs[1]
-    mesh1 = make_primitive_mesh(spec1)
-    mesh2 = make_primitive_mesh(spec2)
-
-    if mode == "stacked":
-        h1 = spec1.get("h", 0.0)
-        # Allow small offset only if spec2 is strictly smaller — keeps it on top
-        max_ox = max(0.0, (_spec_w(spec1) - _spec_w(spec2)) / 2)
-        max_oz = max(0.0, (_spec_d(spec1) - _spec_d(spec2)) / 2)
-        ox2 = float(rng.uniform(-max_ox, max_ox))
-        oz2 = float(rng.uniform(-max_oz, max_oz))
-        oy2 = pallet_top_y + h1
-        mesh1.translate([0.0, pallet_top_y, 0.0])
-        mesh2.translate([ox2, oy2, oz2])
-        # cargo_back_z uses only the BASE item: the stacked item is above, not beside,
-        # so it does not affect the jack position (jack goes under the pallet, not the cargo).
-        cargo_back_z = -_spec_d(spec1) / 2
-        items = [
-            (mesh1, {**spec1, "ox": 0.0, "oy": round(pallet_top_y, 4), "oz": 0.0}),
-            (mesh2, {**spec2, "ox": round(ox2, 4), "oy": round(oy2, 4),
-                     "oz": round(oz2, 4), "placement": "stacked"}),
-        ]
-        return items, cargo_back_z
-
-    if mode == "tandem":
-        # The two items are centred together on the pallet (Z=0):
-        #   cargo1 sits in the back half, cargo2 in the front half.
-        # Ensemble centre at Z=0 →
-        #   oz1 = -(d2 + gap) / 2   (behind centre)
-        #   oz2 = +(d1 + gap) / 2   (in front of centre)
-        # Constraint for pallet fit: d1 + gap + d2 ≤ EUR_D
-        gap = 0.02  # m clearance between items in Z  (matches generate_scene TANDEM_GAP)
-        d1, d2 = _spec_d(spec1), _spec_d(spec2)
-        oz1 = float(-(d2 + gap) / 2)
-        oz2 = float(+(d1 + gap) / 2)
-        mesh1.translate([0.0, pallet_top_y, oz1])
-        mesh2.translate([0.0, pallet_top_y, oz2])
-        # cargo_back_z: back face of cargo1 (most negative Z)
-        cargo_back_z = oz1 - d1 / 2   # = -(d1 + d2 + gap) / 2
-        items = [
-            (mesh1, {**spec1, "ox": 0.0, "oy": round(pallet_top_y, 4), "oz": round(oz1, 4)}),
-            (mesh2, {**spec2, "ox": 0.0, "oy": round(pallet_top_y, 4),
-                     "oz": round(oz2, 4), "placement": "tandem"}),
-        ]
-        return items, cargo_back_z
-
-    raise ValueError(f"Unknown compose mode: {mode!r}")
 
 
 def _person_no_collision(
@@ -280,297 +136,6 @@ def _person_no_collision(
     nz = float(np.clip(pz, box_zmin, box_zmax))
     return (px - nx) ** 2 + (pz - nz) ** 2 >= pr * pr
 
-
-def make_person_mesh(
-    height: float = 1.75,
-    y_rotation_deg: float = 0.0,
-    stl_path: "str | Path | None" = None,
-) -> o3d.geometry.TriangleMesh:
-    """Person mesh: intenta cargar data/person.stl; si no existe, usa cilindro+esfera.
-
-    Args:
-        height:         Altura objetivo en metros (base en Y=0, cima en Y≈height).
-        y_rotation_deg: Rotación aleatoria alrededor del eje Y (0-360°).
-        stl_path:       Ruta explícita al STL (tests); None → detecta automáticamente.
-
-    Invariantes de salida:
-        vertices[:,1].min() ≈ 0.0        (base en suelo)
-        vertices[:,1].max() ≈ height      (cima a la altura pedida)
-        centrado en XZ alrededor de X=0, Z=0
-    """
-    _stl = Path(stl_path) if stl_path is not None else Path(__file__).parent.parent / "data" / "person.stl"
-
-    if _stl.exists():
-        mesh = o3d.io.read_triangle_mesh(str(_stl))
-        if len(mesh.vertices) == 0:
-            raise RuntimeError(f"person.stl cargado vacío: {_stl}")
-        mesh.compute_vertex_normals()
-        # Escalar a altura objetivo (invariante a las unidades del STL)
-        verts = np.asarray(mesh.vertices)
-        current_h = verts[:, 1].max() - verts[:, 1].min()
-        if current_h > 1e-6:
-            mesh.scale(height / current_h, center=(0.0, 0.0, 0.0))
-        # Base en Y=0, centrado en XZ
-        verts = np.asarray(mesh.vertices)
-        cx = (verts[:, 0].max() + verts[:, 0].min()) / 2.0
-        cz = (verts[:, 2].max() + verts[:, 2].min()) / 2.0
-        mesh.translate([-cx, -verts[:, 1].min(), -cz])
-    else:
-        # Fallback: cilindro + esfera, proporcionales a height.
-        # Altura total original: body_h=0.95 + head_r*2=0.28 → ~1.23m si head centrado a body_h+head_r.
-        # Repartimos: 84% cuerpo, 16% cabeza (radio=8%).
-        body_h = height * 0.84
-        head_r = height * 0.08
-        body_r = 0.18
-        body = o3d.geometry.TriangleMesh.create_cylinder(radius=body_r, height=body_h, resolution=16)
-        # Open3D crea el cilindro alineado con Z → rotamos 90° en X para que quede en Y
-        R = np.array([[1, 0, 0],
-                      [0, 0, -1],
-                      [0, 1,  0]], dtype=np.float64)
-        body.rotate(R, center=(0.0, 0.0, 0.0))
-        body.translate([0.0, body_h / 2.0, 0.0])   # base en Y=0
-        head = o3d.geometry.TriangleMesh.create_sphere(radius=head_r, resolution=8)
-        head.translate([0.0, body_h + head_r, 0.0])
-        mesh = body + head
-
-    # Rotación Y aleatoria (orientación de la persona en el plano XZ)
-    a = np.deg2rad(y_rotation_deg)
-    R_y = np.array([
-        [ np.cos(a), 0.0, np.sin(a)],
-        [       0.0, 1.0,       0.0],
-        [-np.sin(a), 0.0, np.cos(a)],
-    ], dtype=np.float64)
-    mesh.rotate(R_y, center=(0.0, 0.0, 0.0))
-    return mesh
-
-
-def make_pallet_jack_mesh() -> o3d.geometry.TriangleMesh:
-    """
-    Simplified traspaleta (pallet jack).
-    Origin = body front face, floor level (Y=0, Z=0).
-    Forks extend in +Z (toward cargo/pallet).
-    Body extends in -Z (operator side).
-
-    Local extents:
-      Body:   X:-0.35..+0.35, Y:0..0.90, Z:-0.40..0
-      Fork L: X:-0.30..-0.15, Y:0..0.08, Z:0..+1.15
-      Fork R: X:+0.15..+0.30, Y:0..0.08, Z:0..+1.15
-    """
-    body = o3d.geometry.TriangleMesh.create_box(0.70, 0.90, 0.40)
-    body.translate([-0.35, 0.0, -0.40])
-    fork_l = o3d.geometry.TriangleMesh.create_box(0.15, 0.08, 1.15)
-    fork_l.translate([-0.35, 0.0, 0.0])
-    fork_r = o3d.geometry.TriangleMesh.create_box(0.15, 0.08, 1.15)
-    fork_r.translate([ 0.20, 0.0, 0.0])
-    return body + fork_l + fork_r
-
-
-def load_forklift(stl_path: str) -> o3d.geometry.TriangleMesh:
-    """
-    Load forklift STL (in mm) and convert to metres.
-    STL Z=0 is the cab rear, Z=1.962 are the forks.
-    We translate so forks sit just behind the pallet back edge (world Z≈-0.85m)
-    and the cab is further back (world Z≈-2.8m).  No overlap with cargo.
-    """
-    fk = o3d.io.read_triangle_mesh(stl_path)
-    fk.scale(0.001, center=(0.0, 0.0, 0.0))    # mm → m
-    fk.compute_vertex_normals()
-    verts = np.asarray(fk.vertices)
-    y_min = verts[:, 1].min()
-    # Sit on floor (Y) and push back so forks (Z=1.962) end up at world Z≈-0.85
-    # → Z_translate = -0.85 - 1.962 = -2.812 ≈ -2.8
-    fk.translate([0.0, -y_min, -2.8])
-    return fk
-
-
-def sample_labeled(
-    mesh: o3d.geometry.TriangleMesh,
-    label: int,
-    n_points: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Uniformly sample mesh surface → (pts [N,3], labels [N,])."""
-    pcd = mesh.sample_points_uniformly(number_of_points=n_points)
-    pts = np.asarray(pcd.points, dtype=np.float32)
-    lbs = np.full(len(pts), label, dtype=np.uint8)
-    return pts, lbs
-
-
-def sample_floor(cfg: dict, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
-    """Random uniform points on Y=0 plane within floor_extent_x / floor_extent_z."""
-    ext_x = cfg["floor_extent_x"]
-    ext_z = cfg["floor_extent_z"]
-    n = cfg["pts_floor"]
-    pts = np.zeros((n, 3), dtype=np.float32)
-    pts[:, 0] = rng.uniform(-ext_x, ext_x, n).astype(np.float32)
-    pts[:, 2] = rng.uniform(-ext_z, ext_z, n).astype(np.float32)
-    lbs = np.zeros(n, dtype=np.uint8)
-    return pts, lbs
-
-
-# ── Camera visibility filter ───────────────────────────────────────────────────
-
-def camera_arc_filter(
-    pts: np.ndarray,
-    labels: np.ndarray,
-    cameras: list[dict],
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Keep only points inside the FOV cone of at least one camera.
-    Each camera looks toward the origin from its 'pos'.
-    Simple angle-based filter — no raycasting occlusion (TODO v2).
-    """
-    visible = np.zeros(len(pts), dtype=bool)
-    for cam in cameras:
-        cam_pos = np.array(cam["pos"], dtype=np.float64)
-        fov_half = np.deg2rad(cam["fov_deg"] / 2.0)
-        view_dir = -cam_pos / np.linalg.norm(cam_pos)   # looks at origin
-
-        to_pts = pts.astype(np.float64) - cam_pos       # (N, 3)
-        norms = np.linalg.norm(to_pts, axis=1, keepdims=True)
-        norms = np.maximum(norms, 1e-9)
-        cos_a = (to_pts / norms) @ view_dir              # (N,)
-        visible |= cos_a > np.cos(fov_half)
-
-    return pts[visible], labels[visible]
-
-
-# ── Distance-dependent density falloff ────────────────────────────────────────
-
-def apply_distance_density(
-    pts: np.ndarray,
-    labels: np.ndarray,
-    cameras: list[dict],
-    rng: np.random.Generator,
-    ref_dist: float = 1.5,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Simulate stereo-camera density falloff: density ∝ 1/d².
-    At ref_dist (1.5m): no extra dropout.
-    At 3m: ~75% of remaining points dropped.
-    Matches the real data pattern where distant floor/walls are sparse.
-    """
-    min_dist = np.full(len(pts), np.inf)
-    for cam in cameras:
-        cam_pos = np.array(cam["pos"], dtype=np.float64)
-        d = np.linalg.norm(pts.astype(np.float64) - cam_pos, axis=1)
-        min_dist = np.minimum(min_dist, d)
-
-    # p_keep = (ref_dist / d)²  clamped to [0.15, 1.0]
-    p_keep = np.clip((ref_dist / np.maximum(min_dist, ref_dist)) ** 2, 0.15, 1.0)
-    keep = rng.random(len(pts)) < p_keep
-    return pts[keep], labels[keep]
-
-
-# ── Sensor degradation (label-aware) ──────────────────────────────────────────
-
-def degrade_labeled(
-    pts: np.ndarray,
-    labels: np.ndarray,
-    cfg: dict,
-    rng: np.random.Generator,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Simulate real-sensor imperfections while keeping label correspondence:
-      1. Voxel downsampling   — limits spatial resolution
-      2. Gaussian noise       — calibrated to FUSION3D σ≈10mm
-      3. Point dropout        — simulates reflectance / occlusion losses
-      4. Local outliers       — stray reflections, multi-path artefacts
-    """
-    if len(pts) == 0:
-        return pts, labels
-
-    # 1. Voxel downsampling (numpy, label-safe)
-    voxel_idx = np.floor(pts / cfg["voxel_size"]).astype(np.int64)
-    _, unique = np.unique(voxel_idx, axis=0, return_index=True)
-    pts, labels = pts[unique], labels[unique]
-
-    # 2. Gaussian noise
-    pts = pts + rng.normal(0.0, cfg["noise_std"], pts.shape).astype(np.float32)
-
-    # 3. Dropout
-    keep = rng.random(len(pts)) > cfg["dropout_ratio"]
-    pts, labels = pts[keep], labels[keep]
-    if len(pts) == 0:
-        return pts, labels
-
-    # 4. Local outliers (label = 255 → "unlabeled / artefact")
-    n_out = max(1, int(len(pts) * cfg["outlier_ratio"]))
-    anchors = pts[rng.integers(0, len(pts), n_out)]
-    offsets = rng.normal(0.0, cfg["local_outlier_std"], (n_out, 3)).astype(np.float32)
-    out_pts = anchors + offsets
-    out_lbs = np.full(n_out, 255, dtype=np.uint8)
-
-    pts    = np.vstack([pts, out_pts])
-    labels = np.concatenate([labels, out_lbs])
-    return pts, labels
-
-
-# ── Label → RGB colour map ────────────────────────────────────────────────────
-#  Colours are baked into the PLY so CloudCompare shows them immediately.
-#  The numeric `label` field is also kept for programmatic use.
-
-LABEL_RGB: dict[int, tuple[int, int, int]] = {
-    0:   ( 60,  60,  60),   # floor   — gris oscuro, retrocede sobre fondo oscuro CC
-    1:   (220,  50,  50),   # cargo   — rojo
-    2:   (  0, 120, 255),   # vehicle — azul vivo
-    3:   ( 39, 174,  96),   # person  — verde
-    4:   (255, 210,   0),   # pallet  — amarillo
-    255: ( 60,  60,  60),   # outlier — mismo gris oscuro que suelo
-}
-_DEFAULT_RGB = (255, 0, 255)   # magenta for unknown labels
-
-
-def labels_to_rgb(labels: np.ndarray) -> np.ndarray:
-    """Map label array → uint8 RGB array (N, 3)."""
-    rgb = np.full((len(labels), 3), _DEFAULT_RGB, dtype=np.uint8)
-    for lv, color in LABEL_RGB.items():
-        rgb[labels == lv] = color
-    return rgb
-
-
-# ── PLY export (binary, no PCL camera block) ───────────────────────────────────
-
-def save_ply(path: Path, pts: np.ndarray, labels: np.ndarray) -> None:
-    """
-    Write binary-little-endian PLY with: x y z red green blue label.
-    - RGB encodes the label → CloudCompare shows colours immediately on open.
-    - `label` scalar field is kept for programmatic use.
-    Hand-written header → no PCL camera block.
-    """
-    n = len(pts)
-    rgb = labels_to_rgb(labels)
-
-    header = (
-        "ply\n"
-        "format binary_little_endian 1.0\n"
-        f"element vertex {n}\n"
-        "property float x\n"
-        "property float y\n"
-        "property float z\n"
-        "property uchar red\n"
-        "property uchar green\n"
-        "property uchar blue\n"
-        "property uchar label\n"
-        "end_header\n"
-    ).encode("ascii")
-
-    dtype = np.dtype([
-        ("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
-        ("red", "u1"), ("green", "u1"), ("blue", "u1"),
-        ("label", "u1"),
-    ])
-    data = np.empty(n, dtype=dtype)
-    data["x"] = pts[:, 0].astype(np.float32)
-    data["y"] = pts[:, 1].astype(np.float32)
-    data["z"] = pts[:, 2].astype(np.float32)
-    data["red"]   = rgb[:, 0]
-    data["green"] = rgb[:, 1]
-    data["blue"]  = rgb[:, 2]
-    data["label"] = labels.astype(np.uint8)
-
-    with open(path, "wb") as f:
-        f.write(header)
-        f.write(data.tobytes())
 
 
 # ── Scene generation ───────────────────────────────────────────────────────────
@@ -884,24 +449,30 @@ def run_generation(
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
     cfg = parse_args(CFG)
 
     stl_path = Path(__file__).parent.parent / "data" / "forklift.stl"
     if stl_path.exists():
-        print(f"Loading forklift STL from {stl_path} …")
+        log.info("Loading forklift STL from %s", stl_path)
     else:
-        print(f"[warn] forklift.stl not found at {stl_path}, using primitive traspaleta instead.")
+        log.warning("forklift.stl not found at %s, using primitive traspaleta instead.", stl_path)
 
-    print(f"Generating {cfg['n_samples']} scenes → {cfg['output_dir']}")
-    print(f"  noise={cfg['noise_std']}m  dropout={cfg['dropout_ratio']}  voxel={cfg['voxel_size']}m")
-    print(f"  floor={cfg.get('enable_floor', True)}  p_pallet={cfg['p_pallet']}  p_person={cfg['p_person']}  p_multi_cargo={cfg['p_multi_cargo']}")
+    log.info("Generating %d scenes → %s", cfg['n_samples'], cfg['output_dir'])
+    log.info("  noise=%.3fm  dropout=%.2f  voxel=%.3fm", cfg['noise_std'], cfg['dropout_ratio'], cfg['voxel_size'])
+    log.info("  floor=%s  p_pallet=%.2f  p_person=%.2f  p_multi_cargo=%.2f",
+             cfg.get('enable_floor', True), cfg['p_pallet'], cfg['p_person'], cfg['p_multi_cargo'])
 
     def print_progress(i, n):
         if i % 10 == 0 or i == n:
-            print(f"  [{i:4d}/{n}]")
+            log.info("  [%4d/%d]", i, n)
 
     all_meta = run_generation(cfg, progress_cb=print_progress)
-    print(f"\nDone. {len(all_meta)} scenes → {cfg['output_dir']}/metadata.json")
+    log.info("Done. %d scenes → %s/metadata.json", len(all_meta), cfg['output_dir'])
 
 
 if __name__ == "__main__":

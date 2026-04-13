@@ -7,6 +7,7 @@ Saves figures to ../output/analysis/
 """
 
 import os
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,8 @@ import matplotlib
 matplotlib.use("Agg")   # headless
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+
+log = logging.getLogger(__name__)
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 SYNTH_DIR   = Path("../output/dataset")
@@ -216,13 +219,18 @@ def _roughness_band(
 # ── Main analysis ──────────────────────────────────────────────────────────────
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # ── Load synthetic ──
     synth_plys = sorted(SYNTH_DIR.glob("*.ply"))[:N_SYNTH_MAX]
     if not synth_plys:
         raise RuntimeError(f"No synthetic PLYs found in {SYNTH_DIR}. Run generate_dataset.py first.")
-    print(f"Loading {len(synth_plys)} synthetic scenes …")
+    log.info("Loading %d synthetic scenes …", len(synth_plys))
 
     synth_pts_list, synth_lbs_list = [], []
     for p in synth_plys:
@@ -234,24 +242,24 @@ def main() -> None:
     real_plys = sorted(REAL_DIR.glob("*/FUSION3D/*.ply"))
     if not real_plys:
         raise RuntimeError(f"No real PLYs found in {REAL_DIR}.")
-    print(f"Loading {len(real_plys)} real scenes …")
+    log.info("Loading %d real scenes …", len(real_plys))
     # Align real data to synthetic convention: height → Y axis
     real_pts_list = [align_real_to_synthetic(load_real_ply(p)) for p in real_plys]
     real_floor_ax = detect_floor_axis(load_real_ply(real_plys[0]))
-    print(f"  Real FUSION3D floor axis: {'XYZ'[real_floor_ax]} → remapped to Y")
+    log.info("  Real FUSION3D floor axis: %s → remapped to Y", "XYZ"[real_floor_ax])
 
     # ── Crop real clouds to ROI matching synthetic extent (fair comparison) ──
     real_counts_full = [len(p) for p in real_pts_list]               # full count before crop
     real_pts_full    = real_pts_list                                  # keep full for density maps
     real_pts_list    = [crop_to_roi(p) for p in real_pts_list]
     real_counts_roi  = [len(p) for p in real_pts_list]
-    print(f"  After ROI crop: {np.mean(real_counts_roi):.0f} ± {np.std(real_counts_roi):.0f} pts/scene"
-          f"  (was {np.mean(real_counts_full):.0f} full)")
+    log.info("  After ROI crop: %.0f ± %.0f pts/scene  (was %.0f full)",
+             np.mean(real_counts_roi), np.std(real_counts_roi), np.mean(real_counts_full))
 
     # ─────────────────────────────────────────────────────────────────────────
     # Figure 1: Scene overview — point count + extent distributions
     # ─────────────────────────────────────────────────────────────────────────
-    print("Figure 1: point counts and extents …")
+    log.info("Figure 1: point counts and extents …")
 
     synth_counts = [len(p) for p in synth_pts_list]
     real_counts  = real_counts_roi   # use ROI counts throughout for fair comparison
@@ -283,14 +291,14 @@ def main() -> None:
     # ─────────────────────────────────────────────────────────────────────────
     # Figure 2: Height distribution (floor-relative)
     # ─────────────────────────────────────────────────────────────────────────
-    print("Figure 2: height profiles …")
+    log.info("Figure 2: height profiles …")
 
     # Synthetic: Y is height, floor at Y=0
     synth_heights = np.concatenate([pts[:, 1] for pts in synth_pts_list])
     synth_heights = synth_heights[synth_heights < 2.5]   # clip ceiling artefacts
 
     # Real: after alignment Y is height — RANSAC refines floor offset
-    print("  RANSAC floor detection on real data …")
+    log.info("  RANSAC floor detection on real data …")
     real_h_all = []
     for rpts in real_pts_list[:4]:  # first 4 to save time
         h = floor_relative_height(rpts)
@@ -317,7 +325,7 @@ def main() -> None:
     # ─────────────────────────────────────────────────────────────────────────
     # Figure 3: Top-down (XZ) density heatmaps
     # ─────────────────────────────────────────────────────────────────────────
-    print("Figure 3: XZ density heatmaps …")
+    log.info("Figure 3: XZ density heatmaps …")
 
     def density_map(pts_list, xrange, zrange, bins=60):
         all_pts = np.concatenate(pts_list)
@@ -348,9 +356,9 @@ def main() -> None:
     # ─────────────────────────────────────────────────────────────────────────
     # Figure 4: Local roughness (noise σ)
     # ─────────────────────────────────────────────────────────────────────────
-    print("Figure 4: local roughness / noise σ …")
+    log.info("Figure 4: local roughness / noise σ …")
 
-    print("  Computing roughness for synthetic (sample 5 scenes) …")
+    log.info("  Computing roughness for synthetic (sample 5 scenes) …")
     synth_rough_list = []
     synth_rough_cargo_list = []
     for pts in synth_pts_list[:5]:
@@ -364,7 +372,7 @@ def main() -> None:
     synth_rough       = np.concatenate(synth_rough_list)       if synth_rough_list       else np.array([0.0])
     synth_rough_cargo = np.concatenate(synth_rough_cargo_list) if synth_rough_cargo_list else np.array([0.0])
 
-    print("  Computing roughness for real (sample 4 scenes, ROI-cropped) …")
+    log.info("  Computing roughness for real (sample 4 scenes, ROI-cropped) …")
     real_rough_list = []
     real_rough_cargo_list = []
     for pts in real_pts_list[:4]:
@@ -396,7 +404,7 @@ def main() -> None:
     # ─────────────────────────────────────────────────────────────────────────
     # Figure 5: Nearest-neighbour distance (point spacing)
     # ─────────────────────────────────────────────────────────────────────────
-    print("Figure 5: nearest-neighbour distances …")
+    log.info("Figure 5: nearest-neighbour distances …")
 
     synth_nn = np.concatenate([nn_distances(p) for p in synth_pts_list[:5]])
     real_nn  = np.concatenate([nn_distances(p) for p in real_pts_list[:4]])
@@ -421,7 +429,7 @@ def main() -> None:
     # ─────────────────────────────────────────────────────────────────────────
     # Figure 6: Synthetic label distribution (pie chart)
     # ─────────────────────────────────────────────────────────────────────────
-    print("Figure 6: label distribution …")
+    log.info("Figure 6: label distribution …")
 
     all_lbs = np.concatenate(synth_lbs_list)
     unique_lbs, counts = np.unique(all_lbs, return_counts=True)
@@ -449,7 +457,7 @@ def main() -> None:
     # ─────────────────────────────────────────────────────────────────────────
     # Figure 7: Overlay comparison — NN spacing + roughness on same axes
     # ─────────────────────────────────────────────────────────────────────────
-    print("Figure 7: overlay comparison (synthetic vs real) …")
+    log.info("Figure 7: overlay comparison (synthetic vs real) …")
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     fig.suptitle("Synthetic vs Real FUSION3D — direct overlay", fontweight="bold")
@@ -546,7 +554,7 @@ def main() -> None:
     for name, pct in sorted(label_pct.items(), key=lambda x: -x[1]):
         print(f"║    {name:<10s}  {pct:>5.1f}%                                          ║")
     print(f"╠══════════════════════════════════════════════════════════════════╣")
-    noise_std_cur = 0.030  # keep in sync with generate_dataset.py CFG
+    noise_std_cur = 0.035  # keep in sync with generate_dataset.py CFG
     voxel_cur     = 0.019
     print(f"║ PARAMETER STATUS  (noise={noise_std_cur*1000:.0f}mm  voxel={voxel_cur*1000:.0f}mm)              ║")
     if nn_ratio > 1.5:

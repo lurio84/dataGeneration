@@ -36,7 +36,7 @@ from generate_dataset import (
     LABEL_RGB,
     EUR_W, EUR_H, EUR_D,
 )
-from preview_grid import render_scene, load_synth
+from utils.preview_grid import render_scene, load_synth
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

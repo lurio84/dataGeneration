@@ -16,7 +16,7 @@ import streamlit as st
 # ── Importar módulos del proyecto ──────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
 from generate_dataset import run_generation, CFG          # noqa: E402
-from preview_grid import render_scene                      # noqa: E402
+from utils.preview_grid import render_scene                # noqa: E402
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
