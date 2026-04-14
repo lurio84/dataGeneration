@@ -388,7 +388,7 @@ Ejecutado sobre mix de 100 v1 oficiales + 39 legacy de iteraciones previas con C
 
 - **Estrategia floor v2:** **Opción A — with_floor, sin subsampling.** El default `--floor-subsample none` queda como definitivo.
 - **Speedup v2:** por `--lgbm-only-cv` + `--max-samples-rf 2000000` + `--cv-subsample 0.10`. Proyección: retrain v2 (500 escenas, ~30M pts) en ~40-50 min, sin OOM.
-- **Class weights:** `--class-weight-mult person:2,pallet:2` activo en v2 para proteger las minoritarias.
+- **Class weights:** ~~`--class-weight-mult person:2,pallet:2` activo~~ → **Revertido en §15**: medido contraproducente, baja F1 en TODAS las clases, no usar.
 - **Feature 17:** se queda. El test unitario confirma que el algoritmo es correcto; puede aportar en v2 aunque en v1 contaminado no desplazó el F1.
 
 ### Nueva memoria registrada
@@ -418,3 +418,107 @@ Ejecutado sobre mix de 100 v1 oficiales + 39 legacy de iteraciones previas con C
 - Sin modelos entrenados aún (todos los `.pkl` borrados en Fase 0 del plan)
 
 **Siguiente paso:** re-correr bench sobre v1 limpio para medir F1 honesto (debería estar cerca del 0.89 histórico de §11 LGBM). Si matchea → Fase 1.7 (retrain + validación visual BBB). Si no matchea → investigar features (eliminación de `dist_xz` sin reemplazo equivalente puede haber dolido más de lo pensado).
+
+---
+
+## 15. Diagnóstico LGBM v1 sobre BBB real — 3 hallazgos (2026-04-14)
+
+**Estado:** Diagnóstico cerrado. Quedan 2 problemas estructurales pendientes (ver final).
+
+Sesión de validación visual sobre las 6 escenas BBB reales reveló múltiples problemas en cascada en el modelo entrenado sobre v1 limpio. Los descubrimientos se hicieron por iteración: modelo → predicción real → render PNG y CloudCompare → diagnóstico → fix → siguiente iteración.
+
+### Hallazgo 1 — Feature `z` era positional leakage
+
+**Síntoma:** En las primeras predicciones sobre BBB se observaron **bandas paralelas a ejes** en TOP view (rojo/azul/verde organizado en franjas perpendiculares a Z), idéntico patrón al "anillo verde" histórico de §11 pero rotado a ejes rectos.
+
+**Causa:** [features.py](src/classifier/features.py) incluía `z` (depth raw) como feature 2 con comentario "proxy for sensor noise level". En sintético los objetos están en posiciones fijas en Z (cargo en origen, person en perímetro), el modelo memorizaba rangos Z → clase. En real producía bandas. La justificación de "noise proxy" era falsa: el ruido dependiente de distancia ya lo capturan `local_density`, `nbr_y_std`, `normal_y_std`, `planarity`.
+
+**Fix:** Feature `z` eliminada de `FEATURE_NAMES` y de `extract_features()`. De 17 → 16 features. CV F1-macro bajó 0.085 (0.85 → 0.77) — exactamente el tamaño del leak. Tests 92/92 verde.
+
+**Lección general:** cualquier feature posicional cruda (x, y, z, dist_*) en clasificadores per-point sobre datasets sintéticos centrados es un riesgo de leakage. La regla general: features deben ser invariantes a translación de la nube, salvo la altura `y` que es legítima por su correlación física con la clase.
+
+### Hallazgo 2 — Distribution shift de densidad sintético→real
+
+**Síntoma:** Tras quitar `z`, las bandas desaparecen pero las predicciones siguen mal. Distribución sobre BBB real (vs target sintético):
+
+| Clase | Target | Sin voxelizar | Con vox 0.035 |
+|---|---|---|---|
+| floor | 77% | 2% | **18-21%** |
+| cargo | 9% | 38% | **7-15%** |
+| vehicle | 5% | 42% | 34-50% (mesh §12) |
+| person | 2% | 3% | **5-17%** |
+| pallet | 7% | 14% | **2-6%** |
+
+**Causa medida:** densidad real **3.2× mayor** que sintética (mediana `local_density` 537 vs 153, p90 783 vs 229). Real BBB scene: ~270k pts. Synth scene: ~60k pts. Ratio total 4.8×. El feature `local_density` (radio 0.15 m) está completamente fuera del rango aprendido en sintético, y otros features de vecindario indirectamente afectados.
+
+**Causa raíz del shift:** sintético usa voxel 0.019 m + `camera_arc_filter` agresivo que dropea muchos puntos. Real FUSION3D fusiona 3 cámaras sin filtro equivalente y produce densidad nativa mucho mayor.
+
+**Fix validado en sesión:** voxelizar el PLY real a **0.035 m** antes de predict alinea la densidad media con el sintético (med 178 vs 163, p90 250 vs 229). Al predict con BBB voxelizado:
+- Floor sube de 2% a 18-21% ✅
+- Cargo baja de 38% a 7-15% ✅
+- Pallet vuelve a rango razonable ✅
+- Person y vehicle no se arreglan completamente (otros problemas)
+
+**Pendiente de implementar permanentemente:** añadir flag `--voxel-size FLOAT` a [predict.py](src/classifier/predict.py) que voxelice el input PLY antes de extraer features. Default sugerido `0.035` (medido empíricamente). En esta sesión se hizo el preprocessing manual con un script externo usando `open3d.geometry.PointCloud.voxel_down_sample`.
+
+**Lección general:** features absolutas de vecindario (densidad, conteos, distancias) son sensibles a densidad de muestreo. Si los pipelines de captura sintético y real difieren en densidad → inevitablemente hay shift. Soluciones: (a) calibrar densidad al emitir/preprocesar, (b) usar features normalizadas relativas a la densidad de la escena, (c) usar features puramente geométricas invariantes (PCA descriptors).
+
+### Hallazgo 3 — `--class-weight-mult person:2,pallet:2` era contraproducente
+
+**Síntoma:** Person sobre-predicho en BBB real con `class_weight='balanced' × person:2`. Hipótesis inicial: el multiplicador encima de `balanced` (que ya pesa person ~55× por su frecuencia 1.8%) lleva el peso efectivo a ~110×, generando over-prediction.
+
+**Verificación CV:** retrain LGBM-only con y sin el multiplicador sobre v1 limpio (sin `z`):
+
+| Clase | con `person:2,pallet:2` | **sin multiplicador** | Δ |
+|---|---|---|---|
+| floor | 0.9590 | **0.9719** | +0.013 |
+| cargo | 0.8327 | **0.8889** | **+0.056** |
+| vehicle | 0.5622 | **0.6164** | +0.054 |
+| person | 0.7223 | **0.8213** | **+0.099** |
+| pallet | 0.7693 | **0.8034** | +0.034 |
+| **macro** | **0.7691** | **0.8204** | **+0.051** |
+
+**Confirmado:** quitar el multiplicador mejora F1 en TODAS las clases, incluido person (+0.099, contra-intuitivo). El plan original que añadía el multiplicador estaba equivocado.
+
+**Causa:** sample weights × balanced sobre minoritarias muy pequeñas (person 1.8%) produce gradientes excesivos que sobreajustan el modelo a patrones específicos de esa clase en el set sintético. En CV (con StratifiedGroupKFold scene-level) los patrones no se generalizan al validation fold.
+
+**Fix:** el flag `--class-weight-mult` se mantiene en train.py como infra opcional pero **no se usa por defecto**. Comando de training canónico de aquí en adelante:
+```
+python3 -u classifier/train.py --data ../output/dataset --out ../models \
+    --max-samples-rf 2000000 --lgbm-only-cv --skip-rf-retrain \
+    --cv-subsample 0.3 --cv-estimators 100 --n-estimators 300 --n-jobs -1
+```
+
+**Lección general:** class_weight='balanced' del propio LGBM/RF ya hace lo que hace falta. Multiplicar encima sobre minoritarias muy desbalanceadas es contraproducente — sobreajusta por gradiente excesivo, especialmente si la minoritaria sintética no representa bien las minoritarias reales.
+
+### Estado de modelo y problemas restantes
+
+**Modelo actual** (`models/classifier_lgbm.pkl` post-cierre):
+- Features: 16 (sin `z`)
+- Trained sin multiplicadores
+- CV F1-macro: 0.8204 (honesto)
+- Per-class CV: floor 0.97 / cargo 0.89 / vehicle 0.62 / person 0.82 / pallet 0.80
+- LGBM only (no RF, saltado por OOM en máquina sin swap; el flag `--skip-rf-retrain` añadido cubre este caso)
+
+**Problemas estructurales NO resueltos en esta sesión** (para discusión en próxima):
+
+1. **Confusión cargo↔person en estructuras verticales reales.** El bulto BBB (caja vertical) se está dividiendo entre rojo (cargo) y verde (person) en las predicciones sobre las 6 BBB voxelizadas. Ambas clases son "geometría vertical alta" y los features actuales no las separan suficiente cuando hay ruido real. Opciones a explorar:
+   - Features adicionales tipo `bbox_aspect_ratio`, `cluster_size_estimated`, `num_blobs_at_height`, etc.
+   - Mejor aumentación en sintético (mayor variedad de personas/cargos)
+   - Approach distinto al per-point (segmentación por instancia)
+
+2. **Vehicle sobre-predicho** (~40-50% de la nube real). Es el problema de mesh §12 conocido — la traspaleta sintética del commit ce54270 no casa con la geometría real. La cura no es del clasificador, es del mesh o del dataset v2 con mesh mejorado.
+
+### Nuevas memorias registradas
+
+- `feedback_density_shift.md` — voxelizar PLYs reales a 0.035 m antes de predict para alinear densidad con sintético
+- Actualización de `feedback_tree_training_cost.md` o nueva sobre el `class_weight_mult` contraproducente
+
+### Infra committeada en esta sesión
+
+- `src/classifier/features.py` — feature `z` eliminada (16 features totales)
+- `src/classifier/train.py` — flag `--skip-rf-retrain` añadido
+- `output/bench_v1_vox035_nocw/` — 6 PLYs voxelizados predichos (mejor resultado de la sesión, evidencia visual)
+- `output/bench_v1_vox035_nocw_png/` — 6 PNGs preview de ese resultado
+- `output/bbb_vox035/` — 6 BBB reales voxelizados a 0.035 m (input para próxima iteración)
+- `results/bench_v1_clean.csv` — bench A vs C sobre v1 limpio (ejecutado en sesión previa)

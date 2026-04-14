@@ -428,6 +428,11 @@ def main():
         "--lgbm-only-cv", action="store_true",
         help="Skip RF during CV; run only LightGBM CV folds. "
              "RF is still trained in the final retrain. ~5-10x faster CV.")
+    parser.add_argument(
+        "--skip-rf-retrain", action="store_true",
+        help="Skip final RandomForest retrain (only fit LGBM final). "
+             "Useful when you only need the LGBM .pkl for prediction "
+             "and RF would OOM or be too slow.")
     args = parser.parse_args()
 
     data_dir = Path(args.data)
@@ -525,13 +530,18 @@ def main():
     # ── Retrain on FULL dataset ───────────────────────────────────────────────
     print("\nRetraining on full dataset ...", flush=True)
 
-    rf = make_rf_final()
-    t0 = time.time()
     fit_kwargs_retrain = {}
     if sample_weight is not None:
         fit_kwargs_retrain["sample_weight"] = sample_weight
-    rf.fit(X_scaled, y, **fit_kwargs_retrain)
-    print(f"  RF ({args.n_estimators} trees) trained in {time.time()-t0:.1f}s", flush=True)
+
+    rf = None
+    if not args.skip_rf_retrain:
+        rf = make_rf_final()
+        t0 = time.time()
+        rf.fit(X_scaled, y, **fit_kwargs_retrain)
+        print(f"  RF ({args.n_estimators} trees) trained in {time.time()-t0:.1f}s", flush=True)
+    else:
+        print("  RF retrain SKIPPED (--skip-rf-retrain)", flush=True)
 
     lgbm = make_lgbm()
     t0 = time.time()
@@ -539,7 +549,10 @@ def main():
     print(f"  LGBM trained in {time.time()-t0:.1f}s", flush=True)
 
     # ── Save ─────────────────────────────────────────────────────────────────
-    for name, model in [("rf", rf), ("lgbm", lgbm)]:
+    models_to_save = [("lgbm", lgbm)]
+    if rf is not None:
+        models_to_save.insert(0, ("rf", rf))
+    for name, model in models_to_save:
         path = out_dir / f"classifier_{name}.pkl"
         joblib.dump({
             "model":         model,

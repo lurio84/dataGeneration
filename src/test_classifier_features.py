@@ -1,5 +1,5 @@
 """
-test_classifier_features.py — Unit tests for feature 17: height_above_local_floor.
+test_classifier_features.py — Unit tests for height_above_local_floor.
 
 Tests verify correctness of the local-floor estimation in isolation, without
 running the full training pipeline.
@@ -116,8 +116,8 @@ class TestHeightAboveLocalFloor:
 
     def test_extract_features_shape_and_dtype(self):
         """
-        extract_features returns (N, 17) float32 after adding feature 16.
-        Also checks no NaN/Inf are introduced by the new feature.
+        extract_features returns (N, 16) float32.
+        Also checks no NaN/Inf are introduced by height_above_local_floor.
         """
         rng = np.random.default_rng(2)
         pts = rng.standard_normal((300, 3)).astype(np.float32)

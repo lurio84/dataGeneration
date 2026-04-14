@@ -1,7 +1,7 @@
 """
 features.py — Per-point feature extraction for the 5-class ML classifier.
 
-17 geometric features per point using a k-NN neighbourhood (cKDTree + PCA).
+16 geometric features per point using a k-NN neighbourhood (cKDTree + PCA).
 All features are float32.
 
 Positional features dist_xz and dist_centroid_xz have been intentionally
@@ -9,6 +9,11 @@ removed: they caused the model to learn object positions rather than shapes,
 producing ring-shaped vehicle predictions and systematic person over-prediction
 on real data. Replaced by three geometry-only features: normal_y_std,
 lam_ratio_12, and planarity_large.
+
+Feature z (depth) has been removed: in synthetic data objects occupy fixed Z
+ranges, so the model memorised Z-band → class, producing parallel stripe
+artefacts on real captures. Sensor-noise proxy role is covered by
+local_density, nbr_y_std, normal_y_std, and planarity.
 
 Coordinate convention (inherited from generate_dataset.py):
   X right, Y up (height), Z toward cameras  [metres]
@@ -21,24 +26,23 @@ from scipy.spatial import cKDTree
 FEATURE_NAMES: list[str] = [
     "y",                        # 0  absolute height (critical: floor@0, pallet@0.144)
     "y_norm",                   # 1  relative height in scene
-    "z",                        # 2  depth — proxy for sensor noise level
-    "local_density",            # 3  point count within radius 0.15 m
-    "nbr_y_mean",               # 4  mean Y of k neighbours
-    "nbr_y_std",                # 5  std  Y of k neighbours (local roughness)
-    "height_range_local",       # 6  max-min Y within neighbourhood
-    "normal_y",                 # 7  Y-component of estimated surface normal
-    "curvature",                # 8  λ3 / (λ1+λ2+λ3)
-    "planarity",                # 9  (λ2−λ3) / λ1   [k=20]
-    "linearity",                # 10 (λ1−λ2) / λ1   [k=20]
-    "sphericity",               # 11 λ3 / λ1
-    "verticality",              # 12 |normal_y|
-    "normal_y_std",             # 13 std of normal_y across k neighbours — surface regularity
-    "lam_ratio_12",             # 14 λ1 / λ2 — elongation: high for needles/arms, ~1 for planes
-    "planarity_large",          # 15 (λ2−λ3) / λ1  at k=50 — macro-scale flatness
-    "height_above_local_floor", # 16 Y minus estimated floor Y in local 0.5 m XZ cell
+    "local_density",            # 2  point count within radius 0.15 m
+    "nbr_y_mean",               # 3  mean Y of k neighbours
+    "nbr_y_std",                # 4  std  Y of k neighbours (local roughness)
+    "height_range_local",       # 5  max-min Y within neighbourhood
+    "normal_y",                 # 6  Y-component of estimated surface normal
+    "curvature",                # 7  λ3 / (λ1+λ2+λ3)
+    "planarity",                # 8  (λ2−λ3) / λ1   [k=20]
+    "linearity",                # 9  (λ1−λ2) / λ1   [k=20]
+    "sphericity",               # 10 λ3 / λ1
+    "verticality",              # 11 |normal_y|
+    "normal_y_std",             # 12 std of normal_y across k neighbours — surface regularity
+    "lam_ratio_12",             # 13 λ1 / λ2 — elongation: high for needles/arms, ~1 for planes
+    "planarity_large",          # 14 (λ2−λ3) / λ1  at k=50 — macro-scale flatness
+    "height_above_local_floor", # 15 Y minus estimated floor Y in local 0.5 m XZ cell
 ]
 
-_N_FEATURES = len(FEATURE_NAMES)   # 17
+_N_FEATURES = len(FEATURE_NAMES)   # 16
 
 # Default neighbourhood parameters — exposed as constants so callers can reference them
 # without hard-coding the numbers (e.g. for documentation or validation).
@@ -125,7 +129,7 @@ def extract_features(
     radius: float = LOCAL_RADIUS_M,
 ) -> np.ndarray:
     """
-    Extract 17 per-point geometric features.
+    Extract 16 per-point geometric features.
 
     Parameters
     ----------
@@ -136,16 +140,14 @@ def extract_features(
 
     Returns
     -------
-    feats : (N, 17) float32 array, columns match FEATURE_NAMES
+    feats : (N, 16) float32 array, columns match FEATURE_NAMES
     """
     pts = np.asarray(pts, dtype=np.float32)
     N = len(pts)
 
     feats = np.empty((N, _N_FEATURES), dtype=np.float32)
 
-    x = pts[:, 0]
     y = pts[:, 1]
-    z = pts[:, 2]
 
     # ── Scene-level scalars ──────────────────────────────────────────────────
     y_min = float(y.min())
@@ -155,14 +157,13 @@ def extract_features(
 
     feats[:, 0] = y
     feats[:, 1] = (y - y_min) / y_range
-    feats[:, 2] = z
 
     # ── KD-tree ──────────────────────────────────────────────────────────────
     tree = cKDTree(pts)
 
     # local_density: points within radius (excluding self)
     counts = tree.query_ball_point(pts, r=radius, return_length=True)
-    feats[:, 3] = np.asarray(counts, dtype=np.float32) - 1
+    feats[:, 2] = np.asarray(counts, dtype=np.float32) - 1
 
     # k nearest neighbours (includes self at index 0)
     k_eff = min(k, N)
@@ -170,9 +171,9 @@ def extract_features(
 
     # ── Neighbourhood height stats ───────────────────────────────────────────
     nbr_y = y[idx]   # (N, k_eff)
-    feats[:, 4] = nbr_y.mean(axis=1)
-    feats[:, 5] = nbr_y.std(axis=1)
-    feats[:, 6] = nbr_y.max(axis=1) - nbr_y.min(axis=1)
+    feats[:, 3] = nbr_y.mean(axis=1)
+    feats[:, 4] = nbr_y.std(axis=1)
+    feats[:, 5] = nbr_y.max(axis=1) - nbr_y.min(axis=1)
 
     # ── Local PCA (k=20) ────────────────────────────────────────────────────
     lam1, lam2, lam3, normal_y = _pca_features(pts, idx)
@@ -182,29 +183,29 @@ def extract_features(
     lam1_safe = np.where(lam1 < 1e-10, 1e-10, lam1)
     lam2_safe = np.where(lam2 < 1e-10, 1e-10, lam2)
 
-    feats[:, 7]  = normal_y                            # normal_y
-    feats[:, 8]  = lam3 / lam_sum                      # curvature
-    feats[:, 9]  = (lam2 - lam3) / lam1_safe           # planarity
-    feats[:, 10] = (lam1 - lam2) / lam1_safe           # linearity
-    feats[:, 11] = lam3 / lam1_safe                    # sphericity
-    feats[:, 12] = np.abs(normal_y)                    # verticality
+    feats[:, 6]  = normal_y                            # normal_y
+    feats[:, 7]  = lam3 / lam_sum                      # curvature
+    feats[:, 8]  = (lam2 - lam3) / lam1_safe           # planarity
+    feats[:, 9]  = (lam1 - lam2) / lam1_safe           # linearity
+    feats[:, 10] = lam3 / lam1_safe                    # sphericity
+    feats[:, 11] = np.abs(normal_y)                    # verticality
 
     # normal_y_std: std of normal_y across neighbours — surface regularity
     # Low for flat surfaces (cargo face, floor), high for complex geometry (person)
-    feats[:, 13] = np.abs(normal_y)[idx].std(axis=1)
+    feats[:, 12] = np.abs(normal_y)[idx].std(axis=1)
 
     # lam_ratio_12: λ1/λ2 — ~1 for planar patches, large for elongated structures
     # Helps distinguish fork arms / cylindrical objects from flat box faces
-    feats[:, 14] = lam1 / lam2_safe
+    feats[:, 13] = lam1 / lam2_safe
 
     # ── Macro-scale PCA (k=50) ──────────────────────────────────────────────
     k_large_eff = min(k_large, N)
     _, idx_large = tree.query(pts, k=k_large_eff)
     lam1_l, lam2_l, lam3_l, _ = _pca_features(pts, idx_large)
     lam1_l_safe = np.where(lam1_l < 1e-10, 1e-10, lam1_l)
-    feats[:, 15] = (lam2_l - lam3_l) / lam1_l_safe    # planarity_large
+    feats[:, 14] = (lam2_l - lam3_l) / lam1_l_safe    # planarity_large
 
     # ── Local floor height (XZ grid, 0.5 m cells) ───────────────────────────
-    feats[:, 16] = _height_above_local_floor(pts)      # height_above_local_floor
+    feats[:, 15] = _height_above_local_floor(pts)      # height_above_local_floor
 
     return feats
