@@ -40,6 +40,9 @@ FEATURE_NAMES: list[str] = [
     "lam_ratio_12",             # 13 λ1 / λ2 — elongation: high for needles/arms, ~1 for planes
     "planarity_large",          # 14 (λ2−λ3) / λ1  at k=50 — macro-scale flatness
     "height_above_local_floor", # 15 Y minus estimated floor Y in local 0.5 m XZ cell
+    "linearity_large",          # 16 (λ1−λ2) / λ1  at k=50 — cylinder/needle at macro scale
+    "sphericity_large",         # 17 λ3 / λ1       at k=50 — volumetric spread at macro scale
+    "verticality_large",        # 18 |normal_y|    at k=50 — macro-scale vertical alignment
 ]
 
 _N_FEATURES = len(FEATURE_NAMES)   # 16
@@ -201,11 +204,16 @@ def extract_features(
     # ── Macro-scale PCA (k=50) ──────────────────────────────────────────────
     k_large_eff = min(k_large, N)
     _, idx_large = tree.query(pts, k=k_large_eff)
-    lam1_l, lam2_l, lam3_l, _ = _pca_features(pts, idx_large)
+    lam1_l, lam2_l, lam3_l, normal_y_l = _pca_features(pts, idx_large)
     lam1_l_safe = np.where(lam1_l < 1e-10, 1e-10, lam1_l)
     feats[:, 14] = (lam2_l - lam3_l) / lam1_l_safe    # planarity_large
 
     # ── Local floor height (XZ grid, 0.5 m cells) ───────────────────────────
     feats[:, 15] = _height_above_local_floor(pts)      # height_above_local_floor
+
+    # ── Extra macro-scale descriptors (reuse k=50 eigendecomposition) ───────
+    feats[:, 16] = (lam1_l - lam2_l) / lam1_l_safe    # linearity_large
+    feats[:, 17] = lam3_l / lam1_l_safe               # sphericity_large
+    feats[:, 18] = np.abs(normal_y_l)                 # verticality_large
 
     return feats

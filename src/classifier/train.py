@@ -98,13 +98,48 @@ def _process_scene(args):
     return feats, labels.astype(np.int32), groups, pts
 
 
-def load_dataset(data_dir: Path, n_jobs: int = -1):
+def load_dataset(data_dir: Path, n_jobs: int = -1, cache_path: "Path | None" = None):
     """
     Load all PLYs in parallel, extract features, exclude label=255.
+
+    If ``cache_path`` is provided and exists with the same feature count as
+    FEATURE_NAMES, features are loaded from disk instead of recomputed. Stale
+    caches (different feature count) are auto-invalidated. On a cache miss the
+    computed result is written back to ``cache_path``.
 
     Returns X (N,F) float32, y (N,) int32, groups (N,) int32,
             pts_xyz (N,3) float32 — raw XYZ coordinates (needed for floor subsampling).
     """
+    from classifier.features import FEATURE_NAMES
+
+    if cache_path is not None:
+        cache_path = Path(cache_path)
+        if cache_path.exists():
+            t0 = time.time()
+            data = np.load(cache_path)
+            X, y, groups, pts_xyz = data["X"], data["y"], data["groups"], data["pts_xyz"]
+            if X.shape[1] != len(FEATURE_NAMES):
+                print(
+                    f"Cache {cache_path} has {X.shape[1]} features, "
+                    f"current FEATURE_NAMES has {len(FEATURE_NAMES)}. Recomputing.",
+                    flush=True,
+                )
+            else:
+                elapsed = time.time() - t0
+                print(
+                    f"Loaded features cache from {cache_path}: "
+                    f"{len(X):,} pts × {X.shape[1]} feats in {elapsed:.1f}s",
+                    flush=True,
+                )
+                classes, counts = np.unique(y, return_counts=True)
+                for c, cnt in zip(classes, counts):
+                    print(
+                        f"    label {c} ({LABEL_NAMES.get(int(c), '?')}): {cnt:,} pts "
+                        f"({cnt/len(y)*100:.1f}%)",
+                        flush=True,
+                    )
+                return X, y, groups, pts_xyz
+
     ply_files = sorted(data_dir.glob("*.ply"))
     if not ply_files:
         raise FileNotFoundError(f"No PLY files found in {data_dir}")
@@ -139,6 +174,17 @@ def load_dataset(data_dir: Path, n_jobs: int = -1):
     for c, cnt in zip(classes, counts):
         print(f"    label {c} ({LABEL_NAMES.get(c, '?')}): {cnt:,} pts "
               f"({cnt/len(y)*100:.1f}%)", flush=True)
+
+    if cache_path is not None:
+        t_save = time.time()
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(cache_path, X=X, y=y, groups=groups, pts_xyz=pts_xyz)
+        print(
+            f"  Saved features cache to {cache_path} "
+            f"({cache_path.stat().st_size / 1024 / 1024:.0f} MB, "
+            f"{time.time()-t_save:.1f}s)",
+            flush=True,
+        )
 
     return X, y, groups, pts_xyz
 
@@ -433,6 +479,12 @@ def main():
         help="Skip final RandomForest retrain (only fit LGBM final). "
              "Useful when you only need the LGBM .pkl for prediction "
              "and RF would OOM or be too slow.")
+    parser.add_argument(
+        "--features-cache", default=None, metavar="PATH",
+        help="Path to a .npz file to cache extracted features. If the file "
+             "exists with the same feature count as FEATURE_NAMES, it is "
+             "loaded instead of re-extracting (saves ~25s per run). If it "
+             "does not exist, features are computed and saved on first run.")
     args = parser.parse_args()
 
     data_dir = Path(args.data)
@@ -455,7 +507,11 @@ def main():
           flush=True)
 
     # ── Load + scale ─────────────────────────────────────────────────────────
-    X, y, groups, pts_xyz = load_dataset(data_dir, n_jobs=args.n_jobs)
+    X, y, groups, pts_xyz = load_dataset(
+        data_dir,
+        n_jobs=args.n_jobs,
+        cache_path=Path(args.features_cache) if args.features_cache else None,
+    )
 
     if args.no_floor:
         mask = y != 0
