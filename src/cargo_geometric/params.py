@@ -52,3 +52,8 @@ class GeometricParams:
 
     pallet_min_w: float = 1.20
     pallet_min_d: float = 0.80
+
+    # Cluster-level ML classifier (Paso 5)
+    cluster_classifier_path: str | None = None   # path to .pkl; None = legacy rank-0
+    cluster_classifier_model: str = "lgbm"       # "lgbm" | "rf" (informational only)
+    cluster_min_cargo_prob: float = 0.5          # minimum cargo probability threshold
