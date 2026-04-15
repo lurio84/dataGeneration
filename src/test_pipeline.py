@@ -1143,6 +1143,96 @@ class TestHeightFieldVolume(unittest.TestCase):
         self.assertEqual(res["volume_m3"], 0.0)
         self.assertEqual(res["n_cells"],   0)
 
+    def test_halo_filter_removes_pallet_noise_ring(self):
+        """Small cargo on large pallet with isolated halo: halo eliminated.
+
+        Geometry (floor_y=0, pallet_offset=0.144 m):
+          - Cargo footprint X∈[−0.25,+0.25], Z∈[−0.2,+0.2] (0.5×0.4 m).
+            Top at y=1.144 m → net_h=1.0 m >> tall_threshold=0.20.
+          - Halo: X∈[−0.6,−0.40]∪[+0.40,+0.6], Z∈[−0.4,+0.4].
+            Net height set to 0.08 m (above min_cargo_h=0.05, below tall_threshold).
+          - Gap between cargo and halo ≥ 0.15 m (≥ 3 cells at 0.04 m) → halo
+            forms isolated connected components, not touching cargo cluster.
+
+        Expected: halo_filter_used=True, volume within ±10% of GT (0.20 m³).
+        """
+        rng = np.random.default_rng(42)
+        pallet_offset = 0.144
+        cargo_h = 1.0
+
+        # Cargo top face
+        n_cargo = 8_000
+        cx = rng.uniform(-0.25, 0.25, n_cargo).astype(np.float32)
+        cz = rng.uniform(-0.20, 0.20, n_cargo).astype(np.float32)
+        cy = np.full(n_cargo, pallet_offset + cargo_h, dtype=np.float32)
+
+        # Halo: left and right strips of the EUR pallet, clear of cargo.
+        # Net height = 0.08–0.10 m: above min_cargo_h but below tall_threshold.
+        n_halo = 4_000
+        hx_l = rng.uniform(-0.60, -0.40, n_halo // 2).astype(np.float32)
+        hx_r = rng.uniform(+0.40, +0.60, n_halo // 2).astype(np.float32)
+        hz_l = rng.uniform(-0.40, +0.40, n_halo // 2).astype(np.float32)
+        hz_r = rng.uniform(-0.40, +0.40, n_halo // 2).astype(np.float32)
+        hx = np.concatenate([hx_l, hx_r])
+        hz = np.concatenate([hz_l, hz_r])
+        hy = (pallet_offset + 0.08 + rng.uniform(0.0, 0.02, len(hx))).astype(np.float32)
+
+        pts = np.concatenate([
+            np.stack([cx, cy, cz], axis=1),
+            np.stack([hx, hy, hz], axis=1),
+        ])
+
+        gt_vol = 0.5 * 0.4 * cargo_h  # 0.20 m³
+
+        res = self.hfv(
+            pts,
+            floor_y=0.0,
+            pallet_offset=pallet_offset,
+            min_cargo_h=0.05,
+            tall_threshold=0.20,
+        )
+        self.assertTrue(res["halo_filter_used"],
+                        "halo_filter_used should be True when isolated halo exists")
+        # Allow 15% tolerance: grid quantization at cell_size=0.04 m inflates the
+        # footprint by roughly 1 extra cell on each edge (4–6% over-estimate),
+        # plus ~5% for random point placement near cell boundaries.
+        self.assertAlmostEqual(
+            res["volume_m3"], gt_vol, delta=gt_vol * 0.15,
+            msg=f"volume {res['volume_m3']:.3f} not within 15% of GT {gt_vol}",
+        )
+
+    def test_halo_filter_flat_cargo_permissive(self):
+        """Flat 0.8×0.8×0.05 m cargo: no tall cells → filter bypassed (permissive).
+
+        Geometry (floor_y=0, pallet_offset=0.144 m):
+          - Cargo top at y=0.144+0.05=0.194 m → net_h=0.05 m (just above min_cargo_h).
+          - No cell reaches tall_threshold=0.20 m.
+          - The filter must NOT discard these cells.
+
+        Expected: halo_filter_used=False, volume > 0 (flat cargo retained).
+        """
+        rng = np.random.default_rng(7)
+        n = 8_000
+        x = rng.uniform(-0.4, 0.4, n).astype(np.float32)
+        z = rng.uniform(-0.4, 0.4, n).astype(np.float32)
+        # Top of flat 0.05-m cargo on 0.144-m pallet.
+        y = np.full(n, 0.194, dtype=np.float32)
+        pts = np.stack([x, y, z], axis=1)
+
+        res = self.hfv(
+            pts,
+            floor_y=0.0,
+            pallet_offset=0.144,
+            min_cargo_h=0.05,
+            tall_threshold=0.20,
+        )
+        self.assertFalse(res["halo_filter_used"],
+                         "halo_filter_used should be False for flat cargo")
+        self.assertGreater(res["volume_m3"], 0.0,
+                           "flat cargo volume must not be zero")
+        self.assertGreater(res["n_cells"], 0,
+                           "flat cargo cells must not be suppressed")
+
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
