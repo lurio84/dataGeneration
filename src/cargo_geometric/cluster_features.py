@@ -42,23 +42,19 @@ FEATURE_NAMES: list[str] = [
     "volume_obb",                      # 8
     "density_xz",                      # 9
     "density_volume",                  # 10
-    "height_above_floor_min",          # 11
-    "height_above_floor_max",          # 12
-    "top_slab_frac",                   # 13
-    "bottom_slab_frac",                # 14
-    "top_slab_planarity",              # 15
-    "vertical_profile_entropy",        # 16
-    "fill_ratio",                      # 17
-    "pca_linearity",                   # 18
-    "pca_planarity",                   # 19
-    "pca_sphericity",                  # 20
-    "anchor_inside_frac",              # 21
-    "center_offset_to_anchor_center_norm",  # 22
+    "top_slab_frac",                   # 11
+    "bottom_slab_frac",                # 12
+    "top_slab_planarity",              # 13
+    "vertical_profile_entropy",        # 14
+    "fill_ratio",                      # 15
+    "pca_linearity",                   # 16
+    "pca_planarity",                   # 17
+    "pca_sphericity",                  # 18
 ]
 
-assert len(FEATURE_NAMES) == 23, "FEATURE_NAMES must have exactly 23 entries"
+assert len(FEATURE_NAMES) == 19, "FEATURE_NAMES must have exactly 19 entries"
 
-_N_FEATURES = 23
+_N_FEATURES = 19
 _SLAB_FRAC = 0.15   # top/bottom slab = top/bottom 15% of height band
 _N_VBINS = 10       # bins for vertical profile entropy
 
@@ -143,42 +139,37 @@ def extract_cluster_features(
     feat[9]  = n / max(feat[7], 1e-6)           # pts / base_area (XZ footprint)
     feat[10] = n / max(feat[8], 1e-6)           # pts / obb_volume
 
-    # ── Features 11–12: height above floor ──────────────────────────────────
+    # ── Features 11–13: top/bottom slab ─────────────────────────────────────
     y = pts[:, 1]
-    feat[11] = float(y.min()) - floor_y         # lowest point relative to floor
-    feat[12] = float(y.max()) - floor_y         # highest point relative to floor
-
-    # ── Features 13–16: top/bottom slab ─────────────────────────────────────
     y_min, y_max = float(y.min()), float(y.max())
     h_range = y_max - y_min
     if h_range > 1e-6:
         slab_h = _SLAB_FRAC * h_range
         top_mask    = y >= (y_max - slab_h)
         bottom_mask = y <= (y_min + slab_h)
-        feat[13] = float(top_mask.sum()) / n       # top_slab_frac
-        feat[14] = float(bottom_mask.sum()) / n    # bottom_slab_frac
+        feat[11] = float(top_mask.sum()) / n       # top_slab_frac
+        feat[12] = float(bottom_mask.sum()) / n    # bottom_slab_frac
 
-        # top_slab_planarity: std of Y within the top slab — low → flat lid (cargo);
-        # high → rounded head (person)
+        # top_slab_planarity: low → flat lid (cargo); high → rounded head (person)
         if top_mask.sum() >= 3:
-            feat[15] = float(y[top_mask].std())
+            feat[13] = float(y[top_mask].std())
         else:
-            feat[15] = 0.0
+            feat[13] = 0.0
     else:
-        feat[13] = 1.0   # flat slab
-        feat[14] = 1.0
-        feat[15] = 0.0
+        feat[11] = 1.0
+        feat[12] = 1.0
+        feat[13] = 0.0
 
-    # ── Feature 16: vertical profile entropy ─────────────────────────────────
+    # ── Feature 14: vertical profile entropy ─────────────────────────────────
     if h_range > 1e-6:
         hist, _ = np.histogram(y, bins=_N_VBINS, range=(y_min, y_max))
         prob = hist / max(hist.sum(), 1)
         prob = prob[prob > 0]
-        feat[16] = float(-np.sum(prob * np.log(prob + 1e-12)))
+        feat[14] = float(-np.sum(prob * np.log(prob + 1e-12)))
     else:
-        feat[16] = 0.0
+        feat[14] = 0.0
 
-    # ── Feature 17: fill_ratio (pts vs expected for a solid at this density) ─
+    # ── Feature 15: fill_ratio (pts vs expected for a solid at this density) ─
     # We estimate the voxel-grid fill: occupied cells / bounding box volume
     # Approximation: (n_pts / density_volume) / obb_volume already captured via
     # density_volume, so we use a simpler proxy:
@@ -192,37 +183,18 @@ def extract_cluster_features(
         )
     )
     expected_cells = max((obb_long / cell) * (obb_short / cell), 1.0)
-    feat[17] = len(xz_cells) / expected_cells
+    feat[15] = len(xz_cells) / expected_cells
 
-    # ── Features 18–20: PCA shape descriptors ───────────────────────────────
+    # ── Features 16–18: PCA shape descriptors ───────────────────────────────
     centered = pts - pts.mean(axis=0)
     if n >= 3:
         cov = np.cov(centered.T)
         eigvals = np.sort(np.linalg.eigvalsh(cov))[::-1]   # descending
         e1, e2, e3 = (float(v) for v in eigvals)
         denom = max(e1, 1e-12)
-        feat[18] = (e1 - e2) / denom   # linearity
-        feat[19] = (e2 - e3) / denom   # planarity
-        feat[20] = e3 / denom           # sphericity
-    # else remain 0
-
-    # ── Feature 21: anchor_inside_frac ──────────────────────────────────────
-    # Fraction of cluster points inside the un-expanded anchor bbox
-    ax0, ax1 = anchor.x_min, anchor.x_max
-    az0, az1 = anchor.z_min, anchor.z_max
-    inside = (
-        (pts[:, 0] >= ax0) & (pts[:, 0] <= ax1) &
-        (pts[:, 2] >= az0) & (pts[:, 2] <= az1)
-    )
-    feat[21] = float(inside.sum()) / n
-
-    # ── Feature 22: normalised offset from anchor centre ────────────────────
-    cx, cz = float(pts[:, 0].mean()), float(pts[:, 2].mean())
-    acx, acz = anchor.center_xz
-    anchor_diag = max(
-        np.sqrt((ax1 - ax0) ** 2 + (az1 - az0) ** 2), 1e-6
-    )
-    feat[22] = np.sqrt((cx - acx) ** 2 + (cz - acz) ** 2) / anchor_diag
+        feat[16] = (e1 - e2) / denom   # linearity
+        feat[17] = (e2 - e3) / denom   # planarity
+        feat[18] = e3 / denom          # sphericity
 
     return feat
 

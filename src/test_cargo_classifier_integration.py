@@ -73,10 +73,23 @@ def _build_scene_two_clusters():
 
 
 def _make_mock_classifier(cargo_label: int, preds_for_clusters: list[int]):
-    """Return a mock ClusterClassifier that returns the given predictions."""
+    """Return a mock ClusterClassifier that returns the given predictions.
+
+    Also mocks ``predict_with_proba`` with max-confidence proba rows so the
+    confidence-thresholded negative filter treats every excluded label as
+    confident (max_p=1.0 ≥ threshold).
+    """
     cc = MagicMock()
     cc.label_map = {"cargo": cargo_label, "vehicle": 2, "person": 3}
-    cc.predict.return_value = np.array(preds_for_clusters, dtype=np.int32)
+    preds_arr = np.array(preds_for_clusters, dtype=np.int32)
+    cc.predict.return_value = preds_arr
+
+    label_order = [cargo_label, 2, 3]
+    n = len(preds_for_clusters)
+    proba = np.zeros((n, 3), dtype=np.float64)
+    for i, p in enumerate(preds_for_clusters):
+        proba[i, label_order.index(int(p))] = 1.0
+    cc.predict_with_proba.return_value = (preds_arr, proba)
     return cc
 
 

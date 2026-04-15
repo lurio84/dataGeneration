@@ -23,7 +23,7 @@ from cargo_geometric.cluster_gt import (
 
 
 DATASET_DIR = Path(__file__).parent.parent / "output" / "dataset"
-N_FEATURES = 23
+N_FEATURES = 19
 
 
 # ── Label map sanity ─────────────────────────────────────────────────────────

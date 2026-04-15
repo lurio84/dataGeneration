@@ -58,13 +58,13 @@ def _flat_slab(x: float = 2.0, z: float = 2.0, y: float = 0.05,
 
 class TestFeatureNames:
     def test_count(self):
-        assert len(FEATURE_NAMES) == 23
+        assert len(FEATURE_NAMES) == 19
 
     def test_unique(self):
-        assert len(set(FEATURE_NAMES)) == 23
+        assert len(set(FEATURE_NAMES)) == 19
 
     def test_n_features_constant(self):
-        assert _N_FEATURES == 23
+        assert _N_FEATURES == 19
 
 
 class TestSolidCube:
@@ -77,7 +77,7 @@ class TestSolidCube:
         self.feat = extract_cluster_features(self.pts, self.floor_y, self.anchor)
 
     def test_output_shape(self):
-        assert self.feat.shape == (23,)
+        assert self.feat.shape == (19,)
 
     def test_no_nan(self):
         assert not np.any(np.isnan(self.feat))
@@ -98,13 +98,9 @@ class TestSolidCube:
         # Cube is symmetric → long/short ≈ 1
         assert self.feat[5] == pytest.approx(1.0, abs=0.15)
 
-    def test_all_above_floor(self):
-        # min Y of pts is 0.0 ≥ floor_y
-        assert self.feat[11] >= 0.0
-
     def test_pca_sphericity_high(self):
         # Solid cube → roughly isotropic PCA eigenvalues → sphericity > 0
-        assert self.feat[20] > 0.0
+        assert self.feat[18] > 0.0
 
 
 class TestPersonColumn:
@@ -117,7 +113,7 @@ class TestPersonColumn:
         self.feat = extract_cluster_features(self.pts, self.floor_y, self.anchor)
 
     def test_output_shape(self):
-        assert self.feat.shape == (23,)
+        assert self.feat.shape == (19,)
 
     def test_no_nan(self):
         assert not np.any(np.isnan(self.feat))
@@ -142,7 +138,7 @@ class TestPersonColumn:
     def test_pca_linearity_low(self):
         # roughly uniform fill in XYZ → linearity not extreme
         # (column is not a line, just tall)
-        assert self.feat[18] >= 0.0
+        assert self.feat[16] >= 0.0
 
 
 class TestFlatSlab:
@@ -155,7 +151,7 @@ class TestFlatSlab:
         self.feat = extract_cluster_features(self.pts, self.floor_y, self.anchor)
 
     def test_output_shape(self):
-        assert self.feat.shape == (23,)
+        assert self.feat.shape == (19,)
 
     def test_no_nan(self):
         assert not np.any(np.isnan(self.feat))
@@ -170,11 +166,11 @@ class TestFlatSlab:
 
     def test_planarity_high(self):
         # PCA: flat → one eigenvalue near zero → planarity should be high
-        assert self.feat[19] > 0.3
+        assert self.feat[17] > 0.3
 
     def test_top_slab_planarity_low(self):
         # flat top → low Y std in top slab
-        assert self.feat[15] < 0.05
+        assert self.feat[13] < 0.05
 
 
 class TestDegenerateCluster:
@@ -184,14 +180,14 @@ class TestDegenerateCluster:
         pts = np.array([[0.5, 0.1, 0.5]], dtype=np.float32)
         anchor = _make_anchor()
         feat = extract_cluster_features(pts, 0.0, anchor)
-        assert feat.shape == (23,)
+        assert feat.shape == (19,)
         assert np.all(feat == 0.0)
 
     def test_empty_cluster(self):
         pts = np.zeros((0, 3), dtype=np.float32)
         anchor = _make_anchor()
         feat = extract_cluster_features(pts, 0.0, anchor)
-        assert feat.shape == (23,)
+        assert feat.shape == (19,)
         assert np.all(feat == 0.0)
 
     def test_three_collinear_points(self):
@@ -199,7 +195,7 @@ class TestDegenerateCluster:
         pts = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0]], dtype=np.float32)
         anchor = _make_anchor()
         feat = extract_cluster_features(pts, 0.0, anchor)
-        assert feat.shape == (23,)
+        assert feat.shape == (19,)
         assert not np.any(np.isnan(feat))
 
 
@@ -211,12 +207,12 @@ class TestBatchExtraction:
         col  = _column(n=500)
         anchor = _make_anchor()
         X = extract_features_batch([cube, col], floor_y=0.0, anchor=anchor)
-        assert X.shape == (2, 23)
+        assert X.shape == (2, 19)
 
     def test_empty_list(self):
         anchor = _make_anchor()
         X = extract_features_batch([], floor_y=0.0, anchor=anchor)
-        assert X.shape == (0, 23)
+        assert X.shape == (0, 19)
 
     def test_consistent_with_single(self):
         cube = _solid_cube(n=500)
