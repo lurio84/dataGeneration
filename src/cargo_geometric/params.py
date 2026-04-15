@@ -57,3 +57,11 @@ class GeometricParams:
     cluster_classifier_path: str | None = None   # path to .pkl; None = legacy rank-0
     cluster_classifier_model: str = "lgbm"       # "lgbm" | "rf" (informational only)
     cluster_min_cargo_prob: float = 0.5          # minimum cargo probability threshold
+
+    # Confidence-thresholded negative filter (Paso 1.2).
+    # A cluster predicted as person/vehicle is only *excluded* when the
+    # classifier's maximum class probability is >= this threshold.
+    # Predictions below the threshold are treated permissively (kept as cargo).
+    # Default 0.75 chosen from diagnostic: most real-cargo mis-predictions
+    # have max_proba 0.50–0.74; true persons/vehicles score >= 0.85 typically.
+    negative_filter_confidence: float = 0.75

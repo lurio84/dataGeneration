@@ -71,10 +71,16 @@ class CargoExtractionResult:
 
     cluster_ids_classified_as_cargo: list[int] = field(default_factory=list)
     # DBSCAN cluster IDs retained as cargo (negative-filter policy: all IDs
-    # whose predicted label is NOT person nor vehicle).
+    # whose predicted label is NOT person nor vehicle, or whose vehicle/person
+    # probability is below the confidence threshold).
 
     n_clusters_cargo: int = 0
     # Number of clusters retained as cargo (0 = fallback).
+
+    cluster_proba: np.ndarray | None = None
+    # (n_clusters, n_classes) float64 — class probabilities from the classifier.
+    # None when classifier was not used.  Column order matches the model's
+    # ``classes_`` attribute (see ClusterClassifier.model.classes_).
 
 
 def extract_cargo(
@@ -141,12 +147,18 @@ def extract_cargo(
     # ── Rama B: ML classifier — negative-filter policy ────────────────────────
     X = extract_features_batch(clusters_pts, floor_y=_infer_floor_y(pts_no_floor),
                                anchor=anchor)
-    preds = classifier.predict(X)   # (n_clusters,) int32
+    preds, proba = classifier.predict_with_proba(X)  # (n,) int32, (n, n_classes)
 
-    cargo_ids = _apply_negative_filter(preds, classifier.label_map)
+    cargo_ids = _apply_negative_filter(
+        preds,
+        classifier.label_map,
+        cluster_proba=proba,
+        confidence_threshold=params.negative_filter_confidence,
+    )
 
     if len(cargo_ids) == 0:
-        # All clusters excluded (all labeled person/vehicle) — fall back to rank-0
+        # All clusters excluded (all labeled person/vehicle with high confidence)
+        # — fall back to rank-0
         best = int(np.argmax(sizes))
         keep = dbscan_labels == best
         return CargoExtractionResult(
@@ -161,6 +173,7 @@ def extract_cargo(
             cluster_labels_pred=preds,
             cluster_ids_classified_as_cargo=[],
             n_clusters_cargo=0,
+            cluster_proba=proba,
         )
 
     # Merge all retained clusters
@@ -184,6 +197,7 @@ def extract_cargo(
         cluster_labels_pred=preds,
         cluster_ids_classified_as_cargo=cargo_ids,
         n_clusters_cargo=len(cargo_ids),
+        cluster_proba=proba,
     )
 
 
@@ -192,31 +206,61 @@ def extract_cargo(
 def _apply_negative_filter(
     cluster_labels_pred: np.ndarray,
     label_map: dict[str, int],
+    cluster_proba: np.ndarray | None = None,
+    confidence_threshold: float = 0.75,
 ) -> list[int]:
     """Return cluster IDs whose predicted label is not ``person`` or ``vehicle``.
 
-    Implements the negative-filter policy: cargo is defined by subtraction.
-    Any cluster whose label is NOT person and NOT vehicle is retained.
-    Unlabelled classes (keys absent from ``label_map``) are treated
-    permissively — they are *not* excluded.
+    Implements the confidence-thresholded negative-filter policy:
+
+    * A cluster is *excluded* (treated as non-cargo) only when:
+      (a) its predicted label is ``person`` or ``vehicle``, AND
+      (b) the classifier's maximum class probability for that cluster is
+          >= ``confidence_threshold``.
+
+    * If ``cluster_proba`` is None the threshold is not applied and the
+      original hard-label behaviour is used (backwards-compatible with the
+      legacy rank-0 path and with tests that do not supply probabilities).
+
+    * Unlabelled classes (keys absent from ``label_map``) are treated
+      permissively — they are *not* excluded regardless of probability.
 
     Parameters
     ----------
     cluster_labels_pred : (N,) int array — predicted label per cluster
     label_map           : mapping from class name to integer label
                           (e.g. ``{"cargo": 1, "vehicle": 2, "person": 3}``)
+    cluster_proba       : (N, n_classes) float64 array of class probabilities,
+                          or None to use hard-label exclusion.
+    confidence_threshold : float — minimum max-probability for a
+                          person/vehicle prediction to trigger exclusion.
+                          Default 0.75.
 
     Returns
     -------
     list of cluster IDs (0-indexed) to retain as cargo.
     """
-    excluded: set[int] = set()
+    excluded_labels: set[int] = set()
     for key in ("person", "vehicle"):
         lbl = label_map.get(key)
         if lbl is not None:
-            excluded.add(int(lbl))
-    return [cid for cid, p in enumerate(cluster_labels_pred)
-            if int(p) not in excluded]
+            excluded_labels.add(int(lbl))
+
+    retained: list[int] = []
+    for cid, pred in enumerate(cluster_labels_pred):
+        if int(pred) not in excluded_labels:
+            retained.append(cid)
+            continue
+        # Predicted as person or vehicle — only exclude if confident enough.
+        if cluster_proba is None:
+            # No probabilities available: hard exclusion (legacy behaviour).
+            continue
+        max_p = float(cluster_proba[cid].max())
+        if max_p < confidence_threshold:
+            # Uncertain prediction: keep cluster as cargo (permissive).
+            retained.append(cid)
+        # else: confident exclusion — do not retain.
+    return retained
 
 
 def _infer_floor_y(pts_no_floor: np.ndarray) -> float:

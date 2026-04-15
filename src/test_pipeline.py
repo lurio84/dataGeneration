@@ -1008,6 +1008,38 @@ class TestNegativeFilterPolicy(unittest.TestCase):
         retained = _apply_negative_filter(preds, label_map)
         self.assertEqual(set(retained), {0})   # only id=0 (label=99) kept
 
+    def test_confidence_threshold_retains_uncertain_vehicle(self):
+        """vehicle cluster with max_proba=0.50 < 0.75 → retained as cargo."""
+        from cargo_geometric.cargo import _apply_negative_filter
+
+        # cid=0: cargo (pred=1)  → always retained
+        # cid=1: vehicle (pred=2), max_proba=0.50 < 0.75 → retained (uncertain)
+        preds = np.array([1, 2], dtype=np.int32)
+        label_map = {"cargo": 1, "vehicle": 2, "person": 3}
+        proba = np.array([[0.65, 0.25, 0.10],
+                          [0.30, 0.50, 0.20]], dtype=np.float64)
+        retained = _apply_negative_filter(
+            preds, label_map, cluster_proba=proba, confidence_threshold=0.75
+        )
+        self.assertIn(0, retained)   # cargo cluster retained
+        self.assertIn(1, retained)   # uncertain vehicle cluster retained
+
+    def test_confidence_threshold_excludes_confident_vehicle(self):
+        """vehicle cluster with max_proba=0.90 >= 0.75 → excluded."""
+        from cargo_geometric.cargo import _apply_negative_filter
+
+        # cid=0: cargo (pred=1)  → always retained
+        # cid=1: vehicle (pred=2), max_proba=0.90 >= 0.75 → excluded (confident)
+        preds = np.array([1, 2], dtype=np.int32)
+        label_map = {"cargo": 1, "vehicle": 2, "person": 3}
+        proba = np.array([[0.90, 0.05, 0.05],
+                          [0.05, 0.90, 0.05]], dtype=np.float64)
+        retained = _apply_negative_filter(
+            preds, label_map, cluster_proba=proba, confidence_threshold=0.75
+        )
+        self.assertIn(0, retained)      # cargo cluster retained
+        self.assertNotIn(1, retained)   # confident vehicle cluster excluded
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 12. Height-field 2.5D volume (Commit 2)
