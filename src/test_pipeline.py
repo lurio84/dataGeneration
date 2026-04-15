@@ -1009,6 +1009,74 @@ class TestNegativeFilterPolicy(unittest.TestCase):
         self.assertEqual(set(retained), {0})   # only id=0 (label=99) kept
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 12. Height-field 2.5D volume (Commit 2)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestHeightFieldVolume(unittest.TestCase):
+    """Unit tests for cargo_geometric.volume.height_field_volume."""
+
+    def setUp(self):
+        from cargo_geometric.volume import height_field_volume
+        self.hfv = height_field_volume
+
+    def test_unit_cube_top_face(self):
+        """Box 1×1×1m — 10 000 pts on top face → volume ≈ 1.0 m³ (±5%)."""
+        rng = np.random.default_rng(0)
+        x = rng.uniform(-0.5, 0.5, 10_000).astype(np.float32)
+        z = rng.uniform(-0.5, 0.5, 10_000).astype(np.float32)
+        y = np.full(10_000, 1.0, dtype=np.float32)
+        pts = np.stack([x, y, z], axis=1)
+        res = self.hfv(pts, floor_y=0.0)
+        self.assertAlmostEqual(res["volume_m3"], 1.0, delta=0.05)
+
+    def test_flat_box_2x1x0p5(self):
+        """Box 2×1×0.5m → volume ≈ 1.0 m³ (±5%)."""
+        rng = np.random.default_rng(1)
+        x = rng.uniform(-1.0, 1.0, 10_000).astype(np.float32)
+        z = rng.uniform(-0.5, 0.5, 10_000).astype(np.float32)
+        y = np.full(10_000, 0.5, dtype=np.float32)
+        pts = np.stack([x, y, z], axis=1)
+        res = self.hfv(pts, floor_y=0.0)
+        self.assertAlmostEqual(res["volume_m3"], 1.0, delta=0.05)
+
+    def test_semi_ellipsoid(self):
+        """Semi-ellipsoid a=0.5,b=0.4,c=0.6 → volume ≈ 2/3·π·abc (±10%)."""
+        import math
+        rng = np.random.default_rng(2)
+        a, b, c = 0.5, 0.4, 0.6
+        # Sample uniformly over the XZ ellipse footprint, then project to surface
+        n = 100_000
+        uv = rng.uniform(-1.0, 1.0, (n * 4, 2))
+        in_disk = uv[:, 0] ** 2 + uv[:, 1] ** 2 <= 1.0
+        uv = uv[in_disk][:n]
+        x = (a * uv[:, 0]).astype(np.float32)
+        z = (b * uv[:, 1]).astype(np.float32)
+        y = (c * np.sqrt(np.maximum(0.0, 1.0 - uv[:, 0]**2 - uv[:, 1]**2))).astype(np.float32)
+        pts = np.stack([x, y, z], axis=1)
+        gt = (2.0 / 3.0) * math.pi * a * b * c
+        res = self.hfv(pts, floor_y=0.0, cell_size=0.02)
+        self.assertAlmostEqual(res["volume_m3"], gt, delta=gt * 0.10)
+
+    def test_empty_cloud(self):
+        """Empty point cloud → volume 0, footprint 0, n_cells 0."""
+        res = self.hfv(np.zeros((0, 3), dtype=np.float32), floor_y=0.0)
+        self.assertEqual(res["volume_m3"],    0.0)
+        self.assertEqual(res["footprint_m2"], 0.0)
+        self.assertEqual(res["n_cells"],      0)
+
+    def test_floor_residual_filtered(self):
+        """Plane at y=0.05, floor_y=0, min_height=0.10 → volume 0."""
+        rng = np.random.default_rng(3)
+        x = rng.uniform(-0.5, 0.5, 1_000).astype(np.float32)
+        z = rng.uniform(-0.5, 0.5, 1_000).astype(np.float32)
+        y = np.full(1_000, 0.05, dtype=np.float32)
+        pts = np.stack([x, y, z], axis=1)
+        res = self.hfv(pts, floor_y=0.0, min_height=0.10)
+        self.assertEqual(res["volume_m3"], 0.0)
+        self.assertEqual(res["n_cells"],   0)
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

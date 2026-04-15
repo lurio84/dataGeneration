@@ -41,6 +41,7 @@ from cargo_geometric.floor import preprocess, remove_floor              # noqa: 
 from cargo_geometric.anchor import find_anchor                          # noqa: E402
 from cargo_geometric.pallet import detect_pallets                       # noqa: E402
 from cargo_geometric.cargo import extract_cargo                         # noqa: E402
+from cargo_geometric.volume import height_field_volume                  # noqa: E402
 from ply_io.ply import save_ply                                         # noqa: E402
 
 
@@ -122,6 +123,19 @@ def main() -> int:
     )
     t_cargo = time.perf_counter() - t3
 
+    # ── Stage 4: 2.5D height-field volume ────────────────────────────────────
+    volume_result: dict | None = None
+    if cargo_res is not None:
+        vol = height_field_volume(cargo_res.cargo_pts, floor.floor_y)
+        volume_result = {
+            "method":       "height_field_2.5d",
+            "cell_size":    vol["cell_size"],
+            "volume_m3":    round(vol["volume_m3"],    4),
+            "footprint_m2": round(vol["footprint_m2"], 4),
+            "max_height":   round(vol["max_height"],   3),
+            "mean_height":  round(vol["mean_height"],  3),
+        }
+
     # ── Debug PLY ─────────────────────────────────────────────────────────────
     # Labels: 2=floor (blue), 1=rest (red), 3=cargo (green)
     labels = np.full(len(pts), 1, dtype=np.uint8)
@@ -200,6 +214,7 @@ def main() -> int:
                 "n_clusters_cargo": cargo_res.n_clusters_cargo,
             }
         ),
+        "volume": volume_result,
         "cluster_classifier": cluster_classifier_meta,
         "timing_s": {
             "preprocess": round(t_pre, 3),
