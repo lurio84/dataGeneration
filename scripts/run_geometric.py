@@ -128,12 +128,13 @@ def main() -> int:
     if cargo_res is not None:
         vol = height_field_volume(cargo_res.cargo_pts, floor.floor_y)
         volume_result = {
-            "method":       "height_field_2.5d",
-            "cell_size":    vol["cell_size"],
-            "volume_m3":    round(vol["volume_m3"],    4),
-            "footprint_m2": round(vol["footprint_m2"], 4),
-            "max_height":   round(vol["max_height"],   3),
-            "mean_height":  round(vol["mean_height"],  3),
+            "method":        "height_field_2.5d",
+            "cell_size":     vol["cell_size"],
+            "pallet_offset": vol["pallet_offset"],
+            "volume_m3":     round(vol["volume_m3"],    4),
+            "footprint_m2":  round(vol["footprint_m2"], 4),
+            "max_height":    round(vol["max_height"],   3),
+            "mean_height":   round(vol["mean_height"],  3),
         }
 
     # ── Debug PLY ─────────────────────────────────────────────────────────────

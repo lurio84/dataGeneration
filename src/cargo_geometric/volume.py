@@ -8,10 +8,16 @@ This approach is shape-agnostic: it handles boxes, bags, cylinders, and
 irregular loads equally well because it only relies on the top-surface
 profile rather than any geometric model.
 
-The height field integrates correctly for:
-  * Axis-aligned boxes: footprint × height
-  * Irregular bultos (bags, big-bags): area under the top surface
-  * Semi-ellipsoidal shapes: approximates 2/3 · π · a · b · c
+Effective-floor offset
+----------------------
+The method integrates from ``floor_y + pallet_offset``, not from bare
+``floor_y``.  By default ``pallet_offset = 0.144 m`` (EUR pallet height),
+so the measurement represents the *cargo net volume above the pallet* rather
+than the total column from the warehouse floor.
+
+Cells whose max_Y is below ``floor_y + pallet_offset + min_cargo_h`` are
+treated as empty (pallet surface, floor residuals, noise).  Valid cells
+contribute ``(max_Y - floor_y - pallet_offset) × cell_area``.
 """
 
 from __future__ import annotations
@@ -23,45 +29,54 @@ def height_field_volume(
     cargo_pts: np.ndarray,
     floor_y: float,
     cell_size: float = 0.04,
-    min_height: float = 0.10,
+    pallet_offset: float = 0.144,
+    min_cargo_h: float = 0.05,
 ) -> dict:
-    """2.5D height-field volume of a point set above a known floor.
+    """2.5D height-field volume of a point set above the effective floor.
 
-    For each XZ cell of side ``cell_size``, the local height is
-    ``max(Y_in_cell) - floor_y``.  Cells whose local height is below
-    ``min_height`` are treated as empty (floor residuals, noise, holes).
+    The *effective floor* is at ``floor_y + pallet_offset``.  Each XZ cell
+    of side ``cell_size`` contributes ``max(0, max_Y_in_cell - effective_floor)``
+    as its local height.  Cells whose net height is below ``min_cargo_h`` are
+    treated as empty (pallet surface, noise, holes).
 
     Parameters
     ----------
     cargo_pts : (N, 3) float array
         Cargo points in world coordinates (X, Y, Z).
     floor_y : float
-        World-Y coordinate of the floor plane.
+        World-Y coordinate of the floor plane (from RANSAC floor removal).
     cell_size : float
         Grid cell side length in metres.  Default 0.04 m ≈ voxel_size × 1.2.
-    min_height : float
-        Minimum valid cell height in metres.  Cells below this threshold are
-        excluded to suppress floor residuals and sensor noise.
+    pallet_offset : float
+        Height of the pallet platform above ``floor_y`` in metres.
+        Default 0.144 m = EUR pallet height.  Set to 0.0 when no pallet is
+        present or when measuring total column height from the raw floor.
+    min_cargo_h : float
+        Minimum net cargo height in metres (above ``floor_y + pallet_offset``).
+        Cells below this threshold are discarded to suppress pallet-surface
+        points, floor residuals, and sensor noise.  Default 0.05 m.
 
     Returns
     -------
     dict with keys:
-        ``volume_m3``    : float — Σ cell_area × cell_height over occupied cells
-        ``footprint_m2`` : float — total area of occupied cells
-        ``mean_height``  : float — mean height of occupied cells
-        ``max_height``   : float — tallest occupied cell
-        ``n_cells``      : int   — number of occupied cells
-        ``height_field`` : np.ndarray (H, W) float64 — per-cell height (0 = empty)
-        ``cell_size``    : float — echoed for traceability
+        ``volume_m3``     : float — Σ cell_area × net_height over occupied cells
+        ``footprint_m2``  : float — total area of occupied cells
+        ``mean_height``   : float — mean net height of occupied cells
+        ``max_height``    : float — tallest occupied cell (net height)
+        ``n_cells``       : int   — number of occupied cells
+        ``height_field``  : np.ndarray (H, W) float64 — net height per cell (0 = empty)
+        ``cell_size``     : float — echoed for traceability
+        ``pallet_offset`` : float — echoed for traceability
     """
     _empty = {
-        "volume_m3":    0.0,
-        "footprint_m2": 0.0,
-        "mean_height":  0.0,
-        "max_height":   0.0,
-        "n_cells":      0,
-        "height_field": np.zeros((0, 0), dtype=np.float64),
-        "cell_size":    cell_size,
+        "volume_m3":     0.0,
+        "footprint_m2":  0.0,
+        "mean_height":   0.0,
+        "max_height":    0.0,
+        "n_cells":       0,
+        "height_field":  np.zeros((0, 0), dtype=np.float64),
+        "cell_size":     cell_size,
+        "pallet_offset": pallet_offset,
     }
 
     if len(cargo_pts) == 0:
@@ -86,15 +101,16 @@ def height_field_volume(
     j_idx = np.clip(((z - z_min) / cell_size).astype(np.int64), 0, n_rows - 1)
 
     # Reduce: maximum Y per (row, col) cell.
-    # Unvisited cells initialise to -inf so they never exceed min_height.
+    # Unvisited cells initialise to -inf so they fall below min_cargo_h.
     hf = np.full((n_rows, n_cols), -np.inf, dtype=np.float64)
     np.maximum.at(hf, (j_idx, i_idx), y)
 
-    # Convert absolute Y to height above floor.
-    hf -= floor_y
+    # Convert absolute Y to net height above effective floor (floor + pallet).
+    effective_floor = floor_y + pallet_offset
+    hf -= effective_floor
 
-    # Mask out cells below min_height (includes unvisited cells at -inf).
-    valid = hf >= min_height
+    # Discard cells below min_cargo_h (pallet surface, noise, unvisited).
+    valid = hf >= min_cargo_h
     hf[~valid] = 0.0  # zero out for clean height_field output
 
     n_cells = int(valid.sum())
@@ -109,11 +125,12 @@ def height_field_volume(
     max_height  = float(heights.max())
 
     return {
-        "volume_m3":    volume_m3,
-        "footprint_m2": footprint,
-        "mean_height":  mean_height,
-        "max_height":   max_height,
-        "n_cells":      n_cells,
-        "height_field": hf,
-        "cell_size":    cell_size,
+        "volume_m3":     volume_m3,
+        "footprint_m2":  footprint,
+        "mean_height":   mean_height,
+        "max_height":    max_height,
+        "n_cells":       n_cells,
+        "height_field":  hf,
+        "cell_size":     cell_size,
+        "pallet_offset": pallet_offset,
     }
