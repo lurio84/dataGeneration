@@ -959,6 +959,56 @@ class TestCargoOnVehicle(unittest.TestCase):
                 self.assertTrue(has_jack, "pallet_jack no encontrado en escena sin pallet")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 11. Negative-filter policy (Commit 1)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestNegativeFilterPolicy(unittest.TestCase):
+    """Unit tests for the negative-filter cargo extraction policy."""
+
+    def test_filter_excludes_person_and_vehicle(self):
+        """[cargo,person,vehicle,cargo,cargo] → retained ids {0,3,4}; {1,2} excluded."""
+        from cargo_geometric.cargo import _apply_negative_filter
+
+        # Predictions: cargo=1, person=3, vehicle=2, cargo=1, cargo=1
+        preds = np.array([1, 3, 2, 1, 1], dtype=np.int32)
+        label_map = {"cargo": 1, "vehicle": 2, "person": 3}
+
+        retained = _apply_negative_filter(preds, label_map)
+
+        self.assertEqual(set(retained), {0, 3, 4})
+        self.assertNotIn(1, retained)   # person excluded
+        self.assertNotIn(2, retained)   # vehicle excluded
+
+    def test_filter_all_cargo(self):
+        """All cargo predictions → all cluster ids retained."""
+        from cargo_geometric.cargo import _apply_negative_filter
+
+        preds = np.array([1, 1, 1], dtype=np.int32)
+        label_map = {"cargo": 1, "vehicle": 2, "person": 3}
+        retained = _apply_negative_filter(preds, label_map)
+        self.assertEqual(set(retained), {0, 1, 2})
+
+    def test_filter_all_excluded(self):
+        """All person/vehicle → empty list (triggers rank-0 fallback)."""
+        from cargo_geometric.cargo import _apply_negative_filter
+
+        preds = np.array([3, 2, 3], dtype=np.int32)
+        label_map = {"cargo": 1, "vehicle": 2, "person": 3}
+        retained = _apply_negative_filter(preds, label_map)
+        self.assertEqual(retained, [])
+
+    def test_filter_permissive_unknown_class(self):
+        """Label absent from label_map is treated as cargo (permissive)."""
+        from cargo_geometric.cargo import _apply_negative_filter
+
+        # label 99 is not in label_map → not excluded
+        preds = np.array([99, 3, 2], dtype=np.int32)
+        label_map = {"cargo": 1, "vehicle": 2, "person": 3}
+        retained = _apply_negative_filter(preds, label_map)
+        self.assertEqual(set(retained), {0})   # only id=0 (label=99) kept
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

@@ -196,6 +196,7 @@ def main() -> int:
                 "chosen_cluster_id": cargo_res.chosen_cluster_id,
                 "chosen_cluster_size": cargo_res.chosen_cluster_size,
                 "cargo_source": cargo_res.cargo_source,
+                "cargo_policy": cargo_res.cargo_policy,
                 "n_clusters_cargo": cargo_res.n_clusters_cargo,
             }
         ),

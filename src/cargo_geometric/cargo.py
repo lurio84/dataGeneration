@@ -8,17 +8,20 @@ isolate the *cargo* points by:
   2. Removing the floor band (already done upstream).
   3. 3D-DBSCAN of the remaining points.
   4a. (Legacy / no classifier) Keeping the largest cluster — the cargo bulto.
-  4b. (With classifier) Running the cluster-level ML classifier; merging all
-      clusters predicted as ``cargo`` into a single result.
+  4b. (With classifier) Negative-filter policy: all clusters whose predicted
+      label is NOT ``person`` nor ``vehicle`` are retained as cargo.
 
 When ``classifier`` is None, the behaviour is identical to the original
 rank-0 heuristic (backwards-compatible with all existing tests).
 
 When ``classifier`` is provided:
   - Each cluster's features are extracted and classified.
-  - Clusters labelled ``cargo`` are merged into a single result.
-  - If no cluster is labelled ``cargo``, falls back to rank-0 with
-    ``cargo_source="fallback_rank0"``.
+  - **Negative-filter policy**: clusters labelled ``person`` or ``vehicle``
+    are *excluded*; the remainder (unlabelled or labelled ``cargo``) are
+    merged into the cargo mask.  This is permissive by design — unknown
+    classes default to cargo rather than being silently dropped.
+  - If all clusters are excluded (scene is all persons/vehicles), falls back
+    to rank-0 with ``cargo_source="fallback_rank0"``.
   - ``CargoExtractionResult`` gains extra metadata fields for diagnostics.
 
 Sub-cluster info (``cargo_dbscan_min_pts`` / ``cargo_dbscan_eps``) is also
@@ -58,15 +61,20 @@ class CargoExtractionResult:
     # "classifier"     — ML classifier selected cargo cluster(s)
     # "fallback_rank0" — ML classifier found no cargo; fell back to rank-0
 
+    cargo_policy: str = "rank0"
+    # "rank0"           — no classifier; keep largest cluster
+    # "negative_filter" — ML classifier used; cargo = anchor \ (person ∪ vehicle)
+
     cluster_labels_pred: np.ndarray | None = None
     # (n_clusters,) int32 — predicted class for each DBSCAN cluster;
     # None when classifier was not used.
 
     cluster_ids_classified_as_cargo: list[int] = field(default_factory=list)
-    # DBSCAN cluster IDs that the classifier labelled as cargo.
+    # DBSCAN cluster IDs retained as cargo (negative-filter policy: all IDs
+    # whose predicted label is NOT person nor vehicle).
 
     n_clusters_cargo: int = 0
-    # Number of clusters the classifier labelled as cargo (0 = fallback).
+    # Number of clusters retained as cargo (0 = fallback).
 
 
 def extract_cargo(
@@ -124,38 +132,21 @@ def extract_cargo(
             chosen_cluster_id=best,
             chosen_cluster_size=int(sizes[best]),
             cargo_source="legacy",
+            cargo_policy="rank0",
             cluster_labels_pred=None,
             cluster_ids_classified_as_cargo=[],
             n_clusters_cargo=0,
         )
 
-    # ── Rama B: ML classifier ─────────────────────────────────────────────────
+    # ── Rama B: ML classifier — negative-filter policy ────────────────────────
     X = extract_features_batch(clusters_pts, floor_y=_infer_floor_y(pts_no_floor),
                                anchor=anchor)
     preds = classifier.predict(X)   # (n_clusters,) int32
 
-    cargo_label = classifier.label_map.get("cargo")
-    if cargo_label is None:
-        # Label map doesn't have "cargo" key — fallback
-        best = int(np.argmax(sizes))
-        keep = dbscan_labels == best
-        return CargoExtractionResult(
-            cargo_pts=sub_pts[keep],
-            cargo_global_idx=sub_idx[keep],
-            n_total_in_anchor=int(len(sub_idx)),
-            n_clusters=n_clusters,
-            chosen_cluster_id=best,
-            chosen_cluster_size=int(sizes[best]),
-            cargo_source="fallback_rank0",
-            cluster_labels_pred=preds,
-            cluster_ids_classified_as_cargo=[],
-            n_clusters_cargo=0,
-        )
-
-    cargo_ids = [cid for cid, p in enumerate(preds) if p == cargo_label]
+    cargo_ids = _apply_negative_filter(preds, classifier.label_map)
 
     if len(cargo_ids) == 0:
-        # Classifier found no cargo — fall back to rank-0
+        # All clusters excluded (all labeled person/vehicle) — fall back to rank-0
         best = int(np.argmax(sizes))
         keep = dbscan_labels == best
         return CargoExtractionResult(
@@ -166,12 +157,13 @@ def extract_cargo(
             chosen_cluster_id=best,
             chosen_cluster_size=int(sizes[best]),
             cargo_source="fallback_rank0",
+            cargo_policy="negative_filter",
             cluster_labels_pred=preds,
             cluster_ids_classified_as_cargo=[],
             n_clusters_cargo=0,
         )
 
-    # Merge all cargo clusters into one result
+    # Merge all retained clusters
     cargo_mask = np.zeros(len(sub_pts), dtype=bool)
     for cid in cargo_ids:
         cargo_mask |= dbscan_labels == cid
@@ -188,13 +180,44 @@ def extract_cargo(
         chosen_cluster_id=-1,                 # -1 signals merged multi-cluster result
         chosen_cluster_size=total_cargo_pts,
         cargo_source="classifier",
+        cargo_policy="negative_filter",
         cluster_labels_pred=preds,
         cluster_ids_classified_as_cargo=cargo_ids,
         n_clusters_cargo=len(cargo_ids),
     )
 
 
-# ── Internal helper ───────────────────────────────────────────────────────────
+# ── Internal helpers ──────────────────────────────────────────────────────────
+
+def _apply_negative_filter(
+    cluster_labels_pred: np.ndarray,
+    label_map: dict[str, int],
+) -> list[int]:
+    """Return cluster IDs whose predicted label is not ``person`` or ``vehicle``.
+
+    Implements the negative-filter policy: cargo is defined by subtraction.
+    Any cluster whose label is NOT person and NOT vehicle is retained.
+    Unlabelled classes (keys absent from ``label_map``) are treated
+    permissively — they are *not* excluded.
+
+    Parameters
+    ----------
+    cluster_labels_pred : (N,) int array — predicted label per cluster
+    label_map           : mapping from class name to integer label
+                          (e.g. ``{"cargo": 1, "vehicle": 2, "person": 3}``)
+
+    Returns
+    -------
+    list of cluster IDs (0-indexed) to retain as cargo.
+    """
+    excluded: set[int] = set()
+    for key in ("person", "vehicle"):
+        lbl = label_map.get(key)
+        if lbl is not None:
+            excluded.add(int(lbl))
+    return [cid for cid, p in enumerate(cluster_labels_pred)
+            if int(p) not in excluded]
+
 
 def _infer_floor_y(pts_no_floor: np.ndarray) -> float:
     """Approximate floor_y as the minimum Y in pts_no_floor.
