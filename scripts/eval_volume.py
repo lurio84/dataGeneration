@@ -68,6 +68,43 @@ def _cargo_gt_volume(objects: list) -> float:
     return total
 
 
+def _cargo_gt_hf_volume(objects: list) -> float:
+    """GT volume compatible with the height-field measurement.
+
+    height_field_volume measures from the *floor* to the top surface of each
+    column.  The cargo-only GT (``_cargo_gt_volume``) excludes the pallet
+    height (EUR_H ≈ 0.144 m) which the height field includes.
+
+    This function computes footprint × top_y for each cargo item, where
+    ``top_y = oy + h`` (oy = Y of cargo base in world coords).  For stacked
+    cargo the caller gets the sum; this is approximate but sufficient since
+    the stacked item is much smaller than the base.
+
+    Returns 0 if no oy keys are present (older metadata without ox/oy/oz).
+    """
+    total = 0.0
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        for key, spec in obj.items():
+            if not key.startswith("cargo"):
+                continue
+            oy = spec.get("oy")
+            if oy is None:
+                return 0.0   # oy absent — fall back gracefully
+            t = spec.get("type")
+            if t == "box":
+                fp    = spec["w"] * spec["d"]
+                top_y = oy + spec["h"]
+            elif t == "cylinder":
+                fp    = math.pi * spec["r"] ** 2
+                top_y = oy + spec["h"]
+            else:
+                continue
+            total += fp * top_y
+    return total
+
+
 # ── Pipeline helper ───────────────────────────────────────────────────────────
 
 def _run_pipeline(
@@ -137,7 +174,8 @@ def eval_synthetic(
         if not ply_path.exists():
             continue
 
-        gt_vol = _cargo_gt_volume(m["objects"])
+        gt_vol    = _cargo_gt_volume(m["objects"])
+        gt_hf_vol = _cargo_gt_hf_volume(m["objects"])
         if gt_vol <= 0:
             # No cargo in scene (edge case) — skip
             continue
@@ -149,18 +187,22 @@ def eval_synthetic(
             continue
 
         pred_vol = res["volume_hf"]
-        abs_err  = abs(pred_vol - gt_vol)
-        rel_err  = abs_err / gt_vol if gt_vol > 0 else float("nan")
-        sign_err = (pred_vol - gt_vol) / gt_vol if gt_vol > 0 else float("nan")
+
+        def _rel(pred, gt):
+            if gt > 0:
+                return (pred - gt) / gt
+            return float("nan")
 
         results.append({
-            "id":         scene_id,
-            "gt_m3":      round(gt_vol,  4),
-            "pred_m3":    round(pred_vol, 4),
-            "abs_err_m3": round(abs_err,  4),
-            "rel_err":    round(rel_err,  4),
-            "sign_err":   round(sign_err, 4),
-            "source":     res["cargo_source"],
+            "id":              scene_id,
+            "gt_cargo_m3":     round(gt_vol,    4),
+            "gt_hf_m3":        round(gt_hf_vol, 4),
+            "pred_m3":         round(pred_vol,  4),
+            # vs cargo-only GT (diagnostic: shows pallet-height systematic offset)
+            "rel_vs_cargo":    round(_rel(pred_vol, gt_vol),    4),
+            # vs height-field-compatible GT (fair comparison)
+            "rel_vs_hf_gt":    round(_rel(pred_vol, gt_hf_vol), 4) if gt_hf_vol > 0 else None,
+            "source":          res["cargo_source"],
         })
 
         if (i + 1) % 20 == 0 or (i + 1) == n_total:
@@ -175,29 +217,37 @@ def _print_synth_report(rows: list[dict]) -> None:
         print("  No results to report.")
         return
 
-    rel_errs  = np.array([r["rel_err"]  for r in rows])
-    sign_errs = np.array([r["sign_err"] for r in rows])
-    abs_errs  = np.array([r["abs_err_m3"] for r in rows])
+    # -- vs cargo-only GT (expected to be high due to pallet-height offset) --
+    cargo_sign = np.array([r["rel_vs_cargo"] for r in rows])
+    cargo_abs  = np.abs(cargo_sign)
+
+    # -- vs height-field-compatible GT (footprint × top_y, fair comparison) --
+    hf_rows = [r for r in rows if r.get("rel_vs_hf_gt") is not None]
+    hf_sign = np.array([r["rel_vs_hf_gt"] for r in hf_rows]) if hf_rows else None
 
     print(f"\n  Scenes evaluated : {len(rows)}")
-    print(f"  Abs error  mean  : {np.mean(abs_errs):.4f} m³")
-    print(f"  Abs error  median: {np.median(abs_errs):.4f} m³")
-    print(f"  Abs error  p90   : {np.percentile(abs_errs, 90):.4f} m³")
-    print(f"  Rel error  mean  : {np.mean(rel_errs)*100:.1f}%")
-    print(f"  Rel error  median: {np.median(rel_errs)*100:.1f}%")
-    print(f"  Rel error  p90   : {np.percentile(rel_errs, 90)*100:.1f}%")
-    print(f"  Signed rel bias  : {np.mean(sign_errs)*100:+.1f}%  "
-          f"(+ve = over-estimate)")
+    print(f"\n  ── vs cargo-only GT (box: w×h×d; cyl: π·r²·h) ─────────────")
+    print(f"  Note: height field includes pallet height (~0.144 m × footprint).")
+    print(f"  Systematic over-estimation is expected here.")
+    print(f"  Signed rel bias  : {np.mean(cargo_sign)*100:+.1f}%  (+ve = over-estimate)")
+    print(f"  Rel |error| median: {np.median(cargo_abs)*100:.1f}%")
+    print(f"  Rel |error| p90  : {np.percentile(cargo_abs, 90)*100:.1f}%")
 
-    # Histogram of relative error buckets
-    buckets = [(0, 0.05), (0.05, 0.10), (0.10, 0.20), (0.20, 0.50), (0.50, 1e9)]
-    print("\n  Relative error distribution:")
-    for lo, hi in buckets:
-        count = int(np.sum((rel_errs >= lo) & (rel_errs < hi)))
-        pct   = 100 * count / len(rows)
-        label = f"  <{hi*100:.0f}%" if hi < 1e9 else f"  ≥{lo*100:.0f}%"
-        print(f"    [{lo*100:4.0f}% – {hi*100 if hi<1e9 else '∞':>4}%)  "
-              f"{count:4d}  ({pct:5.1f}%)")
+    if hf_sign is not None and len(hf_sign) > 0:
+        hf_abs = np.abs(hf_sign)
+        print(f"\n  ── vs height-field GT (footprint × top_y; fair comparison) ──")
+        print(f"  Signed rel bias  : {np.mean(hf_sign)*100:+.1f}%")
+        print(f"  Rel |error| mean : {np.mean(hf_abs)*100:.1f}%")
+        print(f"  Rel |error| median: {np.median(hf_abs)*100:.1f}%")
+        print(f"  Rel |error| p90  : {np.percentile(hf_abs, 90)*100:.1f}%")
+
+        buckets = [(0, 0.05), (0.05, 0.10), (0.10, 0.20), (0.20, 0.50), (0.50, 1e9)]
+        print("\n  Relative |error| distribution (vs HF-compatible GT):")
+        for lo, hi in buckets:
+            count = int(np.sum((hf_abs >= lo) & (hf_abs < hi)))
+            pct   = 100 * count / len(hf_rows)
+            hi_s  = f"{hi*100:.0f}" if hi < 1e9 else "∞"
+            print(f"    [{lo*100:4.0f}% – {hi_s:>4}%)  {count:4d}  ({pct:5.1f}%)")
 
 
 # ── BBB evaluation ────────────────────────────────────────────────────────────
