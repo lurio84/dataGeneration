@@ -37,11 +37,11 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from cargo_geometric.params import GeometricParams                      # noqa: E402
-from cargo_geometric.floor import preprocess, remove_floor              # noqa: E402
-from cargo_geometric.anchor import find_anchor                          # noqa: E402
+from cargo_geometric.floor import preprocess, remove_floor, synthetic_floor  # noqa: E402
+from cargo_geometric.anchor import find_anchor, points_inside_anchor    # noqa: E402
 from cargo_geometric.pallet import detect_pallets                       # noqa: E402
 from cargo_geometric.cargo import extract_cargo                         # noqa: E402
-from cargo_geometric.volume import height_field_volume                  # noqa: E402
+from cargo_geometric.volume import height_field_volume, obb_volume       # noqa: E402
 from ply_io.ply import save_ply                                         # noqa: E402
 
 
@@ -56,6 +56,23 @@ def _parse_args():
         "--cluster-classifier", dest="cluster_classifier", type=Path,
         default=None, metavar="PATH",
         help="Path to cluster classifier .pkl (optional; enables ML cargo detection)",
+    )
+    p.add_argument(
+        "--preprocessed", action="store_true",
+        help=(
+            "Input cloud has already had floor and noise removed "
+            "(e.g. time_process/ tri_cloud files from Paula's pipeline). "
+            "Skips RANSAC floor removal; uses forced FUSION3D Z→Y alignment; "
+            "overrides cargo DBSCAN eps/min_pts for lower-density clouds."
+        ),
+    )
+    p.add_argument(
+        "--preprocessed-eps", dest="preprocessed_eps", type=float,
+        default=None, metavar="M",
+        help=(
+            "Override cargo DBSCAN eps (metres) in --preprocessed mode. "
+            "Default: params.preprocessed_dbscan_eps (0.15 m)."
+        ),
     )
     return p.parse_args()
 
@@ -94,12 +111,27 @@ def main() -> int:
 
     # ── Stage 0: preprocess ───────────────────────────────────────────────────
     t0 = time.perf_counter()
-    pts = preprocess(in_path, params)
+    if args.preprocessed:
+        # Preprocessed mode: forced FUSION3D Z→Y alignment (safe for clouds
+        # without a floor plane) + no RANSAC floor removal.
+        pts = preprocess(in_path, params, align_mode="fusion3d")
+        # Override DBSCAN params for lower-density preprocessed clouds.
+        params.cargo_dbscan_eps = (
+            args.preprocessed_eps
+            if args.preprocessed_eps is not None
+            else params.preprocessed_dbscan_eps
+        )
+        params.cargo_dbscan_min_pts = params.preprocessed_dbscan_min_pts
+    else:
+        pts = preprocess(in_path, params)
     t_pre = time.perf_counter() - t0
 
     # ── Stage 1: floor removal ────────────────────────────────────────────────
     t1 = time.perf_counter()
-    floor = remove_floor(pts, params)
+    if args.preprocessed:
+        floor = synthetic_floor(pts, params)
+    else:
+        floor = remove_floor(pts, params)
     t_floor = time.perf_counter() - t1
 
     nonfloor_idx = np.where(~floor.floor_mask)[0]
@@ -123,10 +155,29 @@ def main() -> int:
     )
     t_cargo = time.perf_counter() - t3
 
-    # ── Stage 4: 2.5D height-field volume ────────────────────────────────────
+    # ── Anchor volume (pre-ML, comparable to Paula's reference) ──────────────
+    anchor_volume_result: dict | None = None
+    if anchor is not None:
+        _in_anchor = points_inside_anchor(pts_no_floor, anchor, params.anchor_xz_margin)
+        _anchor_pts = pts_no_floor[_in_anchor]
+        if len(_anchor_pts) >= 4:
+            _anch_obb = obb_volume(_anchor_pts)
+            _ext = _anchor_pts.max(axis=0) - _anchor_pts.min(axis=0)  # XYZ extents
+            anchor_volume_result = {
+                "anchor_volume_ch_m3": round(_anch_obb["convhull_volume_m3"], 4),
+                "anchor_obb_volume_m3": round(_anch_obb["obb_volume_m3"], 4),
+                "anchor_n_points": int(len(_anchor_pts)),
+                "anchor_extents_m": [round(float(e), 3) for e in _ext],
+            }
+
+    # ── Stage 4: volume estimation (height-field + OBB + ConvexHull) ─────────
     volume_result: dict | None = None
+    obb_result:    dict | None = None
     if cargo_res is not None:
-        vol = height_field_volume(cargo_res.cargo_pts, floor.floor_y)
+        vol = height_field_volume(
+            cargo_res.cargo_pts, floor.floor_y,
+            horizontal_fill=args.preprocessed,
+        )
         volume_result = {
             "method":        "height_field_2.5d",
             "cell_size":     vol["cell_size"],
@@ -135,6 +186,12 @@ def main() -> int:
             "footprint_m2":  round(vol["footprint_m2"], 4),
             "max_height":    round(vol["max_height"],   3),
             "mean_height":   round(vol["mean_height"],  3),
+        }
+        _obb = obb_volume(cargo_res.cargo_pts)
+        obb_result = {
+            "obb_volume_m3":       round(_obb["obb_volume_m3"],      4),
+            "obb_dims":            [round(d, 3) for d in _obb["obb_dims"]],
+            "convhull_volume_m3":  round(_obb["convhull_volume_m3"], 4),
         }
 
     # ── Debug PLY ─────────────────────────────────────────────────────────────
@@ -171,6 +228,7 @@ def main() -> int:
 
     meta = {
         "input": str(in_path),
+        "preprocessed_mode": args.preprocessed,
         "voxel_size": params.voxel_size,
         "n_points_after_voxel": int(len(pts)),
         "floor": {
@@ -215,7 +273,9 @@ def main() -> int:
                 "n_clusters_cargo": cargo_res.n_clusters_cargo,
             }
         ),
-        "volume": volume_result,
+        "volume":          volume_result,
+        "obb":             obb_result,
+        "anchor_volume":   anchor_volume_result,
         "cluster_classifier": cluster_classifier_meta,
         "timing_s": {
             "preprocess": round(t_pre, 3),
@@ -243,9 +303,26 @@ def main() -> int:
     else:
         cargo_str = "cargo=NONE"
 
+    if volume_result is not None and obb_result is not None:
+        d = obb_result["obb_dims"]
+        anch_ch = (
+            anchor_volume_result["anchor_volume_ch_m3"]
+            if anchor_volume_result is not None else float("nan")
+        )
+        vol_str = (
+            f"  hf={volume_result['volume_m3']:.3f}m³"
+            f"  obb={obb_result['obb_volume_m3']:.3f}m³"
+            f" ({d[0]:.2f}×{d[1]:.2f}×{d[2]:.2f}m)"
+            f"  ch={obb_result['convhull_volume_m3']:.3f}m³"
+            f"  anchor_ch={anch_ch:.3f}m³"
+        )
+    else:
+        vol_str = ""
+
     print(
         f"[{stem}] N={len(pts):>7d} floor={int(floor.floor_mask.sum()):>6d} "
-        f"y={floor.floor_y:+.3f} {anchor_str} {cargo_str}  "
+        f"y={floor.floor_y:+.3f} {anchor_str} {cargo_str}"
+        f"{vol_str}  "
         f"t={t_pre+t_floor+t_anchor+t_pallet+t_cargo:.2f}s → {out_ply.name}"
     )
     return 0

@@ -23,7 +23,83 @@ contribute ``(max_Y - floor_y - pallet_offset) × cell_area``.
 from __future__ import annotations
 
 import numpy as np
-from scipy.ndimage import label as nd_label
+import open3d as o3d
+from scipy.ndimage import label as nd_label, distance_transform_edt
+
+
+def _fill_horizontal_sensor(hf: np.ndarray, tall_threshold: float) -> np.ndarray:
+    """Fill occluded interior cells for horizontal-sensor clouds (e.g. FUSION3D).
+
+    For horizontal-viewing sensors the top face of the cargo is not directly
+    visible; the height field only has reliable coverage on the near face and
+    the two side faces.  Two complementary passes correct this:
+
+    Pass 1 — column-max elevation:
+        For each X column (depth slice), the maximum height seen at any Z row
+        in that column is the best available estimate of the cargo height at
+        that depth.  All cells in the column — whether truly empty (−inf) or
+        present-but-low (sub-tall artefacts from partial face visibility) — are
+        elevated to that column maximum within the Z span defined by the
+        outermost tall rows.
+
+    Pass 2 — nearest-tall propagation for remaining empties:
+        After Pass 1, truly empty cells that fall outside every column's tall
+        span (e.g. the back face) are filled via distance_transform_edt from
+        the nearest tall cell.
+
+    For top-down (synthetic) sensors every cell in the cargo footprint already
+    has a correct height, so this function is effectively a no-op: Pass 1 only
+    elevates cells that are already at the column max (no change), and Pass 2
+    finds no remaining empty cells within any span.
+
+    Parameters
+    ----------
+    hf : (n_rows, n_cols) float64
+        Net height array after subtracting effective floor.  Cells with no
+        observed point have value ``−inf``.
+    tall_threshold : float
+        Minimum net height to qualify as a "tall anchor" cell (same value used
+        by the halo filter in height_field_volume).
+
+    Returns
+    -------
+    hf_out : (n_rows, n_cols) float64
+        Copy of ``hf`` with corrected heights.  Tall-observed cells are never
+        modified.
+    """
+    tall_obs = np.isfinite(hf) & (hf >= tall_threshold)
+    if not tall_obs.any():
+        return hf
+
+    hf_out = hf.copy()
+
+    # ── Pass 1: column-max elevation ─────────────────────────────────────────
+    # For each X column, find the Z span of tall cells and the column max height.
+    # Elevate all below-max cells within that span to the column max.
+    span_mask = np.zeros(hf.shape, dtype=bool)   # cells within some column's tall span
+    for col in range(hf.shape[1]):
+        col_tall_rows = np.where(tall_obs[:, col])[0]
+        if len(col_tall_rows) == 0:
+            continue
+        col_max_h = float(hf[col_tall_rows, col].max())
+        r0, r1 = int(col_tall_rows[0]), int(col_tall_rows[-1])
+        span_mask[r0:r1 + 1, col] = True
+        for row in range(r0, r1 + 1):
+            if hf_out[row, col] < col_max_h:   # includes −inf and sub-max observed
+                hf_out[row, col] = col_max_h
+
+    # ── Pass 2: nearest-tall propagation for remaining empty cells ────────────
+    # After Pass 1 some cells within span_mask may still be −inf
+    # (e.g. columns that gained no tall neighbour from Pass 1 due to span gaps).
+    # Fill them from the nearest tall cell in hf_out.
+    tall_now = np.isfinite(hf_out) & (hf_out >= tall_threshold)
+    remaining_empty = span_mask & ~np.isfinite(hf_out)
+    if remaining_empty.any() and tall_now.any():
+        _, nn = distance_transform_edt(~tall_now, return_indices=True)
+        ri, ci = np.where(remaining_empty)
+        hf_out[ri, ci] = hf_out[nn[0][ri, ci], nn[1][ri, ci]]
+
+    return hf_out
 
 
 def height_field_volume(
@@ -33,6 +109,7 @@ def height_field_volume(
     pallet_offset: float = 0.144,
     min_cargo_h: float = 0.05,
     tall_threshold: float = 0.20,
+    horizontal_fill: bool = False,
 ) -> dict:
     """2.5D height-field volume of a point set above the effective floor.
 
@@ -57,6 +134,15 @@ def height_field_volume(
        that contain at least one M_tall cell.  Isolated low-height halo components
        anchored only to the pallet surface are discarded.
 
+    Horizontal-sensor fill (``horizontal_fill=True``)
+    --------------------------------------------------
+    When set, applies ``_fill_horizontal_sensor`` before the candidate mask step.
+    This corrects for horizontal-viewing sensors (e.g. FUSION3D) where the top
+    face of the cargo is occluded: interior cells are filled using per-column
+    max-height propagation so that each depth slice carries the highest reliably
+    observed height for that slice.  Leave as ``False`` (default) for top-down
+    synthetic sensors.
+
     Parameters
     ----------
     cargo_pts : (N, 3) float array
@@ -77,6 +163,10 @@ def height_field_volume(
         Minimum net height for a cell to count as a "tall anchor" for the
         connected-component halo filter.  Default 0.20 m.  When no cell
         reaches this height the filter is bypassed (flat-cargo fallback).
+    horizontal_fill : bool
+        When True, apply horizontal-sensor occlusion fill before computing
+        the candidate mask.  Use for FUSION3D/horizontal-viewing sensors.
+        Default False (top-down / synthetic data).
 
     Returns
     -------
@@ -135,6 +225,14 @@ def height_field_volume(
     effective_floor = floor_y + pallet_offset
     hf -= effective_floor
 
+    # ── Horizontal-sensor occlusion fill (opt-in) ────────────────────────────
+    # For horizontal-viewing sensors (e.g. FUSION3D) the top face of cargo is
+    # occluded; only vertical faces have coverage.  _fill_horizontal_sensor
+    # propagates tall-neighbour heights into interior cells using per-column
+    # max-height elevation.  Disabled by default for top-down/synthetic data.
+    if horizontal_fill:
+        hf = _fill_horizontal_sensor(hf, tall_threshold)
+
     # ── Candidate mask: cells above min_cargo_h ───────────────────────────────
     valid = hf >= min_cargo_h
 
@@ -183,4 +281,76 @@ def height_field_volume(
         "pallet_offset":    pallet_offset,
         "tall_threshold":   tall_threshold,
         "halo_filter_used": halo_filter_used,
+    }
+
+
+def obb_volume(cargo_pts: np.ndarray) -> dict:
+    """Compute Oriented Bounding Box (OBB) and ConvexHull volumes for cargo points.
+
+    Both methods are standard in logistics cubicaje:
+
+    * **OBB** (Oriented Bounding Box): the tightest box aligned to the principal
+      axes of the point cloud.  Suitable for regular, box-shaped cargo where
+      the stack has a dominant orientation.  Computed with Open3D's
+      ``OrientedBoundingBox.create_from_points()``.
+
+    * **ConvexHull**: smallest convex polyhedron enclosing all points.
+      A strict upper bound — includes any concave voids in the cargo.
+      Computed with Open3D's ``compute_convex_hull()``.
+
+    Dimensions are returned **sorted descending** (longest → shortest) so they
+    are directly comparable with Paula's ``Global size (W, H, D)`` report.
+
+    Parameters
+    ----------
+    cargo_pts : (N, 3) float array
+        Cargo points in world coordinates (X, Y, Z).  Requires N ≥ 4 for
+        ConvexHull; N ≥ 1 for OBB (falls back gracefully otherwise).
+
+    Returns
+    -------
+    dict with keys:
+        ``obb_volume_m3``    : float — OBB volume in cubic metres
+        ``obb_dims``         : list[float] — OBB edge lengths [L, W, H] sorted
+                               descending (metres); all three are the extents of
+                               the oriented box along its principal axes.
+        ``obb_object``       : open3d.geometry.OrientedBoundingBox | None
+        ``convhull_volume_m3``: float — ConvexHull volume in cubic metres
+                               (0.0 when fewer than 4 non-coplanar points)
+    """
+    _empty = {
+        "obb_volume_m3":     0.0,
+        "obb_dims":          [0.0, 0.0, 0.0],
+        "obb_object":        None,
+        "convhull_volume_m3": 0.0,
+    }
+
+    if len(cargo_pts) < 4:
+        return _empty
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(cargo_pts.astype(np.float64))
+
+    # ── OBB ──────────────────────────────────────────────────────────────────
+    try:
+        obb = pcd.get_oriented_bounding_box()
+        dims_raw = np.sort(np.abs(obb.extent))[::-1].tolist()   # descending
+        obb_vol  = float(np.prod(obb.extent))
+    except Exception:
+        return _empty
+
+    # ── ConvexHull ────────────────────────────────────────────────────────────
+    convhull_vol = 0.0
+    try:
+        hull_mesh, _ = pcd.compute_convex_hull()
+        hull_mesh.orient_triangles()
+        convhull_vol = float(hull_mesh.get_volume())
+    except Exception:
+        pass   # non-manifold / degenerate cloud — keep 0.0
+
+    return {
+        "obb_volume_m3":      obb_vol,
+        "obb_dims":           dims_raw,
+        "obb_object":         obb,
+        "convhull_volume_m3": convhull_vol,
     }

@@ -58,6 +58,14 @@ class GeometricParams:
     cluster_classifier_model: str = "lgbm"       # "lgbm" | "rf" (informational only)
     cluster_min_cargo_prob: float = 0.5          # minimum cargo probability threshold
 
+    # Preprocessed-cloud mode (--preprocessed flag in run_geometric.py).
+    # Applied when the input cloud has already had floor + noise removed
+    # (e.g. time_process/ tri_cloud files from Paula's pipeline).
+    # cargo_dbscan_eps and cargo_dbscan_min_pts are overridden at runtime;
+    # the values below are the defaults for ~8-10k pt preprocessed clouds.
+    preprocessed_dbscan_eps: float = 0.15       # 2× default; bridges edge gaps
+    preprocessed_dbscan_min_pts: int = 10       # lower threshold for sparse clouds
+
     # Confidence-thresholded negative filter (Paso 1.2).
     # A cluster predicted as person/vehicle is only *excluded* when the
     # classifier's maximum class probability is >= this threshold.

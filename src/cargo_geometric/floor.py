@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import open3d as o3d
 
-from classifier.predict import read_ply_xyz, align_to_synthetic
+from classifier.predict import read_ply_xyz, align_to_synthetic, _detect_floor_y
 from cargo_geometric.params import GeometricParams
 
 
@@ -24,18 +24,61 @@ class FloorResult:
     attempts: int              # how many RANSAC attempts were tried
 
 
-def preprocess(ply_path: Path, params: GeometricParams) -> np.ndarray:
+def preprocess(ply_path: Path, params: GeometricParams,
+               align_mode: str = "auto") -> np.ndarray:
     """Read PLY, align to Y-up floor=0, voxel down-sample.
+
+    Parameters
+    ----------
+    align_mode : 'auto' | 'fusion3d' | 'none'
+        'auto'     — detect floor axis automatically (default, existing behaviour).
+        'fusion3d' — force Z→Y swap unconditionally (FUSION3D: Z=up, X=depth,
+                     Y=horizontal).  Unlike passing 'fusion3d' to
+                     align_to_synthetic(), this variant does NOT rely on
+                     _detect_floor_axis(), so it is safe for preprocessed clouds
+                     where the floor is absent and the histogram is unreliable.
+        'none'     — no alignment (cloud already in synthetic convention).
 
     Returns (N, 3) float32 array.
     """
     pts = read_ply_xyz(Path(ply_path))
-    pts, _info = align_to_synthetic(pts, mode="auto")
+
+    if align_mode == "fusion3d":
+        # FUSION3D convention: X=depth, Y=horizontal, Z=vertical (up).
+        # Forced Z→Y swap: new_X=old_X, new_Y=old_Z, new_Z=old_Y.
+        # _detect_floor_axis() is NOT called — avoids mis-detection on
+        # preprocessed clouds where there is no floor peak in the histogram.
+        pts = pts[:, [0, 2, 1]].copy()
+        y_off = _detect_floor_y(pts)   # mode of lowest 30 % → Y=0 at floor level
+        pts = pts.copy()
+        pts[:, 1] -= y_off
+    else:
+        pts, _info = align_to_synthetic(pts, mode=align_mode)
 
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts.astype(np.float64))
     pcd = pcd.voxel_down_sample(params.voxel_size)
     return np.asarray(pcd.points, dtype=np.float32)
+
+
+def synthetic_floor(pts: np.ndarray, params: GeometricParams) -> FloorResult:
+    """Create a FloorResult without RANSAC for clouds with floor pre-removed.
+
+    Estimates floor_y as ``min(Y) - floor_band``, placing the virtual floor
+    slightly below the lowest surviving point (typically the pallet bottom
+    after FUSION3D alignment).  No points are removed from ``pts``.
+
+    Returns a FloorResult whose ``floor_mask`` is all-False so that
+    ``pts_no_floor = pts`` (all points pass through to downstream stages).
+    """
+    floor_y = float(pts[:, 1].min()) - params.floor_band
+    return FloorResult(
+        pts=pts,
+        floor_mask=np.zeros(len(pts), dtype=bool),
+        floor_y=floor_y,
+        plane=(0.0, 1.0, 0.0, float(-floor_y)),
+        attempts=0,
+    )
 
 
 def remove_floor(pts: np.ndarray, params: GeometricParams) -> FloorResult:
