@@ -522,3 +522,83 @@ python3 -u classifier/train.py --data ../output/dataset --out ../models \
 - `output/bench_v1_vox035_nocw_png/` — 6 PNGs preview de ese resultado
 - `output/bbb_vox035/` — 6 BBB reales voxelizados a 0.035 m (input para próxima iteración)
 - `results/bench_v1_clean.csv` — bench A vs C sobre v1 limpio (ejecutado en sesión previa)
+
+---
+
+## §16 — Segmentación de persona en datos reales (2026-04-16)
+
+**Problema:** cuando persona y carga están a <15cm, DBSCAN (eps=0.15) las fusiona en un solo cluster. El cluster-level classifier ve un cluster grande con dimensiones de carga → proba=1.00 cargo. La persona se incluye en el cálculo de volumen.
+
+### Approaches evaluados y descartados
+
+**1. Per-point classifier (LGBM, 19 features)**
+
+Ejecutado sobre Esc03, Esc06, Esc17 con voxel 0.035m. Resultados:
+- Esc03: 49% de la escena clasificada como person (proba media 0.92) — la carga entera se confunde con persona
+- Esc06: 18% person, pero distribuido en franjas horizontales, no localizado en la persona real
+- Esc17: 10.5% person, mismo patrón difuso
+
+**Diagnóstico:** features geométricos locales (k-NN PCA, normales, curvatura a k=20/50) no distinguen superficie vertical de caja vs torso humano. La confusión es estructural, no de threshold. Las probabilidades forman un gradiente suave, no una frontera nítida.
+
+PLYs de diagnóstico: `output/eval_real_20esc/perpoint/`
+
+**2. Heurística de columna vertical**
+
+Algoritmo: proyectar en planta XZ → celdas 0.15m → detectar columnas altas (Y>1.0m, range>0.8m) → componentes conexos con footprint < 0.5m² en el borde.
+
+Ejecutado sobre los 20 escenarios (v2 con MIN_HEIGHT=1.0m):
+- Esc06: detección correcta (1,050 pts, footprint 0.135m²)
+- Resto: o no detecta (persona no cumple criterios) o false positives (carga alta confundida con persona)
+- La heurística funciona en ~1/20 escenarios — demasiado frágil
+
+PLYs: `output/eval_real_20esc/heuristic/`
+
+**3. Substracción temporal (multi-captura)**
+
+10 capturas por escenario disponibles. Comparación Cap01 vs Cap02 (Esc06, voxel 0.05m):
+- 48% de puntos tienen distancia >10cm entre capturas
+- Mediana de distancia: 9.4cm — todo el ruido de registro supera el movimiento de la persona
+- Los bboxes de pts "moved" y "static" se superponen completamente
+
+**Causa:** el registro entre capturas consecutivas del mismo escenario tiene ~9cm de error (ruido sensor + calibración imperfecta entre las 3 cámaras). No es posible separar movimiento de persona del ruido.
+
+**4. Nube cenital solamente**
+
+Las cámaras BBB tienen nube individual por cámara (Cenital, Izq, Der) en `Capturas_BBB/2026_03_27/`.
+Hipótesis: la cenital (pitch=90°, mirando hacia abajo) no vería la persona.
+Verificación visual: **la cenital SÍ ve a la persona** en todos los escenarios probados (Esc03, Esc06, Esc11, Esc17) — el pitch=47.5°/90° no es suficientemente vertical para excluirla.
+
+### Approach viable: detección 2D + proyección a 3D
+
+**Setup:** YOLO v8 nano para detectar persona en las PNG rectificadas, luego mapear la bbox 2D a puntos 3D.
+
+**Resultado YOLO:**
+- Cámaras laterales (Izq/Der): detección confiable (conf 0.76–0.88) en todos los escenarios
+- Cámara cenital: detección más débil (conf 0.26–0.37), solo en algunos escenarios
+
+**Resultado proyección 2D→3D:**
+- Hipótesis orden raster PGM→PLY: descartada (0/10 match RGB)
+- Fallback con intrínsecos estimados: funciona parcialmente
+  - Esc06: 4% exclusión (razonable, 472 pts)
+  - Esc03/Esc11/Esc17: 25-30% exclusión (demasiado, radio 0.25m captura carga adyacente)
+
+**Blocker:** sin matrices extrínsecas de calibración cámara→mundo, la proyección 2D→3D es imprecisa. El pipeline C++ de fusión (BBBDriverConsole) computa estas transformaciones pero el código/datos no están en nuestros repos.
+
+PLYs: `output/eval_real_20esc/person_2d/`
+
+### Acción pendiente
+
+**Pedir a Paula las matrices extrínsecas** de calibración por cámara (transformación 4x4 cam→world, o posición+orientación de cada cámara en el frame del arco). También los intrínsecos (focal length px, baseline m, cx/cy). Con estos datos el approach YOLO 2D→3D debería funcionar con precisión.
+
+### Datos descubiertos en esta sesión
+
+- `Capturas_BBB/2026_03_27/` contiene nubes por cámara individual (PLY_Cenital/Izq/Der) + PNG rectificadas + PGM disparidad + config_base.ini para los 19 escenarios (01-19)
+- `Capturas_BBB/2026_03_23/` contiene estructura similar con nombres largos (BBB25503007_izq, etc.) + FUSION3D merged
+- `tri_cloud_sin_filtro.ply` tiene ~3.4M pts con RGB (vs ~12k el filtrado) — la fusión descarta 99.6% de los puntos
+- config_base.ini: 3 cámaras, Cenital (serial 25461175, h=3.68m, pitch=90°), Izq (25503007, h=3.80m, pitch=47.5°), Der (25503005, h=3.80m, pitch=47.5°)
+
+### Scripts de esta sesión
+
+- `scripts/test_person_heuristic.py` — heurística columna vertical (v2, 20 escenarios)
+- `scripts/test_person_2d.py` — YOLO + proyección 2D→3D
+- `scripts/validate_synthetic.py` — validación per-point en sintético
