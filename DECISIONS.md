@@ -693,6 +693,29 @@ Pipeline cerrado como **baseline operativo** con tasa de éxito ~50% en BBB. Doc
 
 **Fine-tune YOLOv8n sobre 19×10 imágenes BBB etiquetadas con YOLO inicial.** Coste ~2h entrenamiento. Resuelve el fallo dominante (persona residual por YOLO 2D con bajo conf en ángulos BBB). Runtime inference sin cambios.
 
+### Corrección diagnóstica (2026-04-17, sesión posterior)
+
+**El diagnóstico "YOLO falla en ángulos BBB" era erróneo.** Re-ejecutando YOLOv8n COCO sobre las 30 capturas "problemáticas", detecta persona con conf **0.83–0.91 en 29/30 casos**. Overlays `results/diagnose_overlay/` (ej. `Esc04_Cap07_Der.jpg`, `Esc06_Cap04_Izq.jpg`) confirman bbox 2D y proyección 3D alineadas → extrínsecas/intrínsecas correctas. **Fine-tune YOLO (Opción B) queda descartado: no resuelve nada.**
+
+Modos de fallo reales del baseline ~50%:
+
+| Modo | Escenarios | Causa |
+|---|---|---|
+| Integridad de datos | Esc04/Cap01 (PNG_Der.png corrupto libpng), Esc06/Cap01 (PLY_Izq.ply truncado 18%) | Archivos rotos en la captura — candidatos a re-captura por Paula |
+| Clustering downstream — cargas pequeñas | Esc07, 08, 09, 10, 13 | Score `n·h/(0.3+dist)` prefiere traspaleta/estructura cuando la carga tiene <3k puntos; rank-0 escoge cluster equivocado |
+| Clustering downstream — residuo traspaleta | (mezclado en los anteriores) | Slice anchor fusiona cargo+pallet/jack; `pallet.py` devuelve 0 candidatos |
+
+### Trabajo real pendiente (reemplaza Opción B)
+
+Afinando más la inspección (overlays + debug_clusters), los 5 fallos de clustering se separan en **dos bugs distintos**:
+
+- **Anchor mal colocado** (Esc09, 10, 13): `find_anchor` escoge un bulto vertical que no es la carga. Fallo upstream — todo lo de abajo es irrelevante si el anchor está mal.
+- **Cargo+traspaleta fusionados** (Esc07, 08): el slice dentro del anchor no separa cargo de traspaleta antes de clusterizar.
+
+Son dos problemas separados; ningún parche de scoring los resuelve simultáneamente. Próximo paso candidato (no comprometido): **spike de 30 min sobre `pallet.py`** para ver si se puede detectar pallet robustamente (hoy devuelve 0 candidatos). Si sí → anchor puede apoyarse en pallet detection (pieza universal, generaliza a otros almacenes). Si no → aceptar baseline y flaggear outliers.
+
+Sesión parada aquí para no seguir parcheando sin plan.
+
 
 
 

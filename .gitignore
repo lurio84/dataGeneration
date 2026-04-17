@@ -46,5 +46,7 @@ models/*.json
 predictions/
 logs/
 
-# Filtered PLY results (large, regenerable with filter_person_yolo.py)
+# Filtered PLY results and diagnostic debug outputs (regenerable)
 results/filtered/
+results/debug_clusters/
+results/diagnose_overlay/
