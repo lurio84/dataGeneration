@@ -42,3 +42,6 @@ models/*.pkl
 
 # Prediction results (regenerable with predict.py)
 predictions/*.ply
+
+# Filtered PLY results (large, regenerable with filter_person_yolo.py)
+results/filtered/

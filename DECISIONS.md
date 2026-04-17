@@ -568,37 +568,56 @@ Las cámaras BBB tienen nube individual por cámara (Cenital, Izq, Der) en `Capt
 Hipótesis: la cenital (pitch=90°, mirando hacia abajo) no vería la persona.
 Verificación visual: **la cenital SÍ ve a la persona** en todos los escenarios probados (Esc03, Esc06, Esc11, Esc17) — el pitch=47.5°/90° no es suficientemente vertical para excluirla.
 
-### Approach viable: detección 2D + proyección a 3D
+### Approach 5 — YOLO 2D + proyección per-camera (FUNCIONA)
 
-**Setup:** YOLO v8 nano para detectar persona en las PNG rectificadas, luego mapear la bbox 2D a puntos 3D.
+**Estado: ✅ Implementado y validado (2026-04-17)**
 
-**Resultado YOLO:**
-- Cámaras laterales (Izq/Der): detección confiable (conf 0.76–0.88) en todos los escenarios
-- Cámara cenital: detección más débil (conf 0.26–0.37), solo en algunos escenarios
+**Setup:** YOLO v8 nano detecta persona en PNG rectificadas de cámaras laterales (Izq/Der). Los PLY per-camera están en frame de cámara con modelo pinhole verificado. Proyección 3D→2D identifica qué puntos caen dentro del bbox. El merged sin_filtro es concatenación exacta Izq→Der→Cenital, así que se eliminan por índice.
 
-**Resultado proyección 2D→3D:**
-- Hipótesis orden raster PGM→PLY: descartada (0/10 match RGB)
-- Fallback con intrínsecos estimados: funciona parcialmente
-  - Esc06: 4% exclusión (razonable, 472 pts)
-  - Esc03/Esc11/Esc17: 25-30% exclusión (demasiado, radio 0.25m captura carga adyacente)
+**Hallazgos clave:**
+- **No se necesitan extrínsecas de Paula.** Los intrínsecos se estimaron por color-matching PLY↔PNG con optimización Nelder-Mead (91% accuracy):
+  - Izq: fx=fy=1680, cx=1045, cy=758 (2048×1536)
+  - Der: fx=fy=1664, cx=1013, cy=750 (2048×1536)
+  - Cenital: fx=fy=833, cx=517, cy=382 (1024×768)
+- Intrínsecos 100% estables entre los 19 escenarios
+- YOLO detecta persona en los 19 escenarios (conf 0.51–0.88 en laterales)
+- Bbox persona NO solapa con carga en ningún escenario (verificado visualmente)
+- Merged sin_filtro = concat exacta Izq+Der+Cenital (verificado por conteo y RGB boundary)
 
-**Blocker:** sin matrices extrínsecas de calibración cámara→mundo, la proyección 2D→3D es imprecisa. El pipeline C++ de fusión (BBBDriverConsole) computa estas transformaciones pero el código/datos no están en nuestros repos.
+**Resultado (E07):** 214,749 pts eliminados (6.2%), persona correctamente identificada, carga intacta.
 
-PLYs: `output/eval_real_20esc/person_2d/`
+**Script:** `scripts/filter_person_yolo.py` (~300 líneas, self-contained)
 
-### Acción pendiente
+**Limitación:** si persona se interpone delante de carga (oclusión), el bbox capturaría puntos de carga. En los 19 escenarios actuales no ocurre.
 
-**Pedir a Paula las matrices extrínsecas** de calibración por cámara (transformación 4x4 cam→world, o posición+orientación de cada cámara en el frame del arco). También los intrínsecos (focal length px, baseline m, cx/cy). Con estos datos el approach YOLO 2D→3D debería funcionar con precisión.
+### Análisis: clasificador per-punto en nubes raw (2026-04-17)
 
-### Datos descubiertos en esta sesión
+**Hallazgo:** las nubes per-camera raw tienen densidad 8.5× mayor que las filtradas (NN distance 3.1mm vs 26.5mm). A esta densidad las features locales (normales, curvatura, PCA) capturan pliegues de ropa y curvatura corporal que antes eran invisibles.
+
+**Resultados con pseudo-labels YOLO (leave-one-escenario-out, 6 escenarios):**
+
+| Feature set | F1 cargo | F1 person | Notas |
+|---|---|---|---|
+| 8 features geométricas | 0.785 | 0.804 | Solo PCA eigenvalue ratios |
+| 10 feat (geo + normal_y_std + height) | 0.849 | 0.858 | Sweet spot |
+| 13 feat (+ RGB) | 0.871 | 0.884 | RGB aporta +2pp |
+
+**Comparación con nubes filtradas:** F1 pasó de 0.655 → 0.85 (10 feat). La densidad es el factor clave.
+
+**Caso difícil:** E01 (cargo retractilado negro, superficie lisa similar a ropa) baja F1 a ~0.70. YOLO sigue funcionando ahí.
+
+**Decisión:** entrenar clasificador per-punto sobre datos reales pseudo-etiquetados por YOLO (sin sintéticos, sin domain gap). Complementa a YOLO como fallback cuando no hay PNG.
+
+### Datos de capturas per-camera
 
 - `Capturas_BBB/2026_03_27/` contiene nubes por cámara individual (PLY_Cenital/Izq/Der) + PNG rectificadas + PGM disparidad + config_base.ini para los 19 escenarios (01-19)
 - `Capturas_BBB/2026_03_23/` contiene estructura similar con nombres largos (BBB25503007_izq, etc.) + FUSION3D merged
 - `tri_cloud_sin_filtro.ply` tiene ~3.4M pts con RGB (vs ~12k el filtrado) — la fusión descarta 99.6% de los puntos
 - config_base.ini: 3 cámaras, Cenital (serial 25461175, h=3.68m, pitch=90°), Izq (25503007, h=3.80m, pitch=47.5°), Der (25503005, h=3.80m, pitch=47.5°)
 
-### Scripts de esta sesión
+### Scripts
 
-- `scripts/test_person_heuristic.py` — heurística columna vertical (v2, 20 escenarios)
-- `scripts/test_person_2d.py` — YOLO + proyección 2D→3D
+- `scripts/filter_person_yolo.py` — filtrado persona YOLO 2D per-camera (FUNCIONA, producción)
+- `scripts/test_person_heuristic.py` — heurística columna vertical (descartado)
+- `scripts/test_person_2d.py` — prototipo YOLO (reemplazado por filter_person_yolo.py)
 - `scripts/validate_synthetic.py` — validación per-point en sintético
