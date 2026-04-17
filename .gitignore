@@ -38,10 +38,13 @@ output/
 
 # Trained model files (too large to version)
 models/*.pkl
+models/*.npz
+models/*.json
 *.pt
 
-# Prediction results (regenerable with predict.py)
-predictions/*.ply
+# Prediction results (regenerable)
+predictions/
+logs/
 
 # Filtered PLY results (large, regenerable with filter_person_yolo.py)
 results/filtered/

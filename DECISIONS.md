@@ -621,3 +621,78 @@ Verificación visual: **la cenital SÍ ve a la persona** en todos los escenarios
 - `scripts/test_person_heuristic.py` — heurística columna vertical (descartado)
 - `scripts/test_person_2d.py` — prototipo YOLO (reemplazado por filter_person_yolo.py)
 - `scripts/validate_synthetic.py` — validación per-point en sintético
+
+---
+
+## §17 — Pipeline extracción de carga real end-to-end (2026-04-17)
+
+**Estado: ✅ Pipeline operativo validado 1 escenario, batch en curso**
+
+### Objetivo
+
+Dado un PLY real (merged tri_cloud) + PNGs per-cámara, extraer sólo los puntos de la carga (verde) y descartar suelo, pallet, persona, traspaleta y entorno.
+
+### Pipeline final
+
+1. **Filtrado persona YOLO en 3 cámaras** (`scripts/filter_person_yolo.py`)
+   - Izq/Der: conf ≥ 0.5
+   - Cenital: conf ≥ 0.3 (COCO YOLO más débil en top-down)
+   - Proyección bbox 2D → masking por rango de índices en merged
+2. **Pipeline geométrico completo** (`scripts/run_geometric.py` sin `--preprocessed`)
+   - `preprocess` voxeliza + elimina NaNs
+   - `remove_floor` RANSAC encuentra plano suelo real
+   - `find_anchor` bbox XZ del bulto vertical dominante
+   - `extract_cargo` DBSCAN eps=0.08 → rank-0 = cluster mayor
+3. **Post-filter altura** — descartar cargo_pts con `y ≤ floor_y + 0.15m` (residuos suelo/pallet base)
+4. **Re-cluster carga** — DBSCAN eps=0.10 min_pts=20 sobre cargo_pts filtrado → rank-0 = sub-cluster mayor (separa silla/traspaleta adyacentes)
+5. **Volumen** — OBB + ConvexHull + height-field sobre cluster final
+
+### Resultados Esc07/Cap01
+
+| Etapa | Cargo pts | OBB (m) | Vol OBB | CH |
+|---|---|---|---|---|
+| Rank-0 legacy (pre-fix) | 14k | 2.76×2.12×0.95 | 5.57 | 2.08 |
+| + height filter | 5.7k | 2.43×2.01×0.88 | 4.29 | 1.20 |
+| + re-cluster eps=0.10 | 4.4k | **1.46×0.91×0.80** | **1.06** | 0.40 |
+
+Dimensiones finales consistentes con carga pallet-sized. Validación visual: carga correctamente identificada, residuo menor de traspaleta lateral aceptable.
+
+### Hallazgos de sesión
+
+- **`--preprocessed` (nubes tri_cloud preprocesadas de Paula) inutilizable para detección de pallet.** La banda del pallet queda con 5 pts en todo el anchor. Usar **tri_cloud_sin_filtro** + pipeline completo con RANSAC.
+- **Cluster classifier ML (negative_filter) sobre-incluye carga.** Sin clase persona explícita retiene 19/22 clusters. Volver a rank-0 legacy es más robusto para este objetivo.
+- **Pallet detection (`pallet.py`) falla porque cargo+pallet quedan fusionados** en el mismo cluster del slice (long dim 2.54m > `pallet_max_long=1.80m`). No es el camino para restringir cargo.
+- **A48 (clamp OBB mínimo 1.2×0.8m)** no resuelve el problema original: el OBB medido era >> pallet. A48 queda como refinamiento futuro independiente.
+
+### Experimento descartado en esta sesión
+
+**Clasificador per-punto real** (`scripts/train_person_raw.py`): entrenado sobre 19 escenarios con transform corregido (bug: fórmula cam→world tenía dos signos invertidos y h_cam=0.98 en lugar de 3.80m). LOOCV F1=0.82, pero precision 0.26–0.63 vs YOLO bbox en validación operativa → pseudo-labels contaminados con fondo dentro del bbox 2D. YOLO 2D puro es más preciso. Modelo queda como insight, no operativo.
+
+### Validación batch (15 escenarios, Cap01)
+
+Esc16-19 excluidos (sin tri_cloud_sin_filtro.ply en time_process).
+
+Resultados v2 (retry YOLO conf 0.3 + scoring híbrido `n·h/(0.3+dist)`):
+
+| Éxito visual | Escenarios |
+|---|---|
+| ✅ OK | 01, 02, 03, 05, 11, 12, 14, 15 (~53%) |
+| ❌ Persona residual | 04, 06 |
+| ❌ Cluster erróneo (carga pequeña) | 07, 08, 09, 10, 13 |
+
+**Tasa de éxito ~50%.** El enfoque tiene límites estructurales:
+
+- **YOLO COCO pre-entrenado falla en ciertas poses/ángulos BBB.** Retry@0.3 no es suficiente; bajar más introduce falsos positivos.
+- **Rank-0 y score `n·h/d` fallan con cargas pequeñas.** Cuando la carga tiene <3k puntos, traspaleta/estructura domina y gana el score por volumen.
+
+### Estado final (2026-04-17)
+
+Pipeline cerrado como **baseline operativo** con tasa de éxito ~50% en BBB. Documentado para que el equipo lo use con intervención manual sobre outliers.
+
+### Próximo salto candidato (Opción B, no ejecutado)
+
+**Fine-tune YOLOv8n sobre 19×10 imágenes BBB etiquetadas con YOLO inicial.** Coste ~2h entrenamiento. Resuelve el fallo dominante (persona residual por YOLO 2D con bajo conf en ángulos BBB). Runtime inference sin cambios.
+
+
+
+

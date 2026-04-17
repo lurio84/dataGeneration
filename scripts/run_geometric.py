@@ -30,6 +30,7 @@ import warnings
 from pathlib import Path
 
 import numpy as np
+import open3d as o3d
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -153,6 +154,73 @@ def main() -> int:
         extract_cargo(pts_no_floor, anchor, params, classifier=classifier)
         if anchor is not None else None
     )
+
+    # Hybrid cluster selection: when no classifier, override rank-0 with a score
+    # that favours clusters with (many points) × (vertical extent) close to the
+    # anchor XZ center. Recovers small-cargo cases where rank-0 picks jack/chair.
+    if cargo_res is not None and classifier is None and anchor is not None:
+        _in_anch = points_inside_anchor(pts_no_floor, anchor, params.anchor_xz_margin)
+        _sub_idx = np.where(_in_anch)[0]
+        _sub_pts = pts_no_floor[_sub_idx]
+        if len(_sub_pts) >= params.cargo_dbscan_min_pts:
+            _pcd = o3d.geometry.PointCloud()
+            _pcd.points = o3d.utility.Vector3dVector(_sub_pts.astype(np.float64))
+            _lbl = np.asarray(
+                _pcd.cluster_dbscan(
+                    eps=params.cargo_dbscan_eps,
+                    min_points=params.cargo_dbscan_min_pts,
+                    print_progress=False,
+                ),
+                dtype=np.int32,
+            )
+            if _lbl.max() >= 0:
+                _cx, _cz = float(anchor.center_xz[0]), float(anchor.center_xz[1])
+                _best_cid, _best_score = -1, -np.inf
+                for _cid in range(int(_lbl.max()) + 1):
+                    _cm = _lbl == _cid
+                    _c = _sub_pts[_cm]
+                    if len(_c) < params.cargo_dbscan_min_pts:
+                        continue
+                    _h_max = float(_c[:, 1].max() - floor.floor_y)
+                    _cent  = _c[:, [0, 2]].mean(axis=0)
+                    _dist  = float(np.hypot(_cent[0] - _cx, _cent[1] - _cz))
+                    _score = len(_c) * _h_max / (0.3 + _dist)
+                    if _score > _best_score:
+                        _best_score, _best_cid = _score, _cid
+                if _best_cid >= 0:
+                    _keep = _lbl == _best_cid
+                    cargo_res.cargo_pts        = _sub_pts[_keep]
+                    cargo_res.cargo_global_idx = _sub_idx[_keep]
+                    cargo_res.chosen_cluster_id   = _best_cid
+                    cargo_res.chosen_cluster_size = int(_keep.sum())
+
+    # Post-filter 1: drop cargo points below pallet top (RANSAC floor residuals).
+    # Pallet top ≈ floor_y + 0.15m. Below that, points are floor/pallet base.
+    if cargo_res is not None and len(cargo_res.cargo_pts) > 0:
+        above_pallet = cargo_res.cargo_pts[:, 1] > floor.floor_y + 0.15
+        cargo_res.cargo_pts        = cargo_res.cargo_pts[above_pallet]
+        cargo_res.cargo_global_idx = cargo_res.cargo_global_idx[above_pallet]
+
+    # Post-filter 2: re-cluster cargo with a tighter eps to split chairs, jacks
+    # and other nearby objects from the true cargo block. Keep the largest
+    # sub-cluster (rank-0 within cargo). Fallback: keep unfiltered cargo if
+    # sub-clustering returns nothing (sparse clouds, small cargo).
+    if cargo_res is not None and len(cargo_res.cargo_pts) >= 30:
+        _pcd = o3d.geometry.PointCloud()
+        _pcd.points = o3d.utility.Vector3dVector(cargo_res.cargo_pts.astype(np.float64))
+        for _eps, _mp in [(0.10, 20), (0.15, 15), (0.20, 10)]:
+            _sub = np.asarray(
+                _pcd.cluster_dbscan(eps=_eps, min_points=_mp, print_progress=False),
+                dtype=np.int32,
+            )
+            if _sub.max() >= 0:
+                _sizes = np.bincount(_sub[_sub >= 0])
+                _best  = int(np.argmax(_sizes))
+                _keep  = _sub == _best
+                cargo_res.cargo_pts        = cargo_res.cargo_pts[_keep]
+                cargo_res.cargo_global_idx = cargo_res.cargo_global_idx[_keep]
+                break
+
     t_cargo = time.perf_counter() - t3
 
     # ── Anchor volume (pre-ML, comparable to Paula's reference) ──────────────

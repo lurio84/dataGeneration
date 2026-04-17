@@ -64,11 +64,12 @@ CAMERAS = {
     },
 }
 
-# Cameras used for person detection (Cenital has low detection rate)
-DETECTION_CAMERAS = ["Izq", "Der"]
+# Cameras used for person detection (all three now — Cenital included)
+DETECTION_CAMERAS = ["Izq", "Der", "Cenital"]
 
 YOLO_MODEL    = "yolov8n.pt"
-CONF_THRESH   = 0.5      # minimum confidence to accept a person detection
+CONF_THRESH   = 0.5      # minimum confidence for lateral cameras (Izq/Der)
+CONF_THRESH_CENITAL = 0.3  # cenital is top-down → COCO YOLO weaker here
 BBOX_PAD_PX   = 5        # pixels of padding around detection bbox
 
 
@@ -319,13 +320,15 @@ def process_capture(
     cenital_start, cenital_end = n_izq + n_der,       n_izq + n_der + n_cenital
     expected_total = n_izq + n_der + n_cenital
 
-    # ── 2. YOLO detection + projection for Izq and Der ───────────────────────
+    # ── 2. YOLO detection + projection for Izq, Der and Cenital ──────────────
     person_mask_izq = np.zeros(n_izq,  dtype=bool)
     person_mask_der = np.zeros(n_der,  dtype=bool)
+    person_mask_cen = np.zeros(n_cenital, dtype=bool)
 
     for cam_name, cam_offset, cam_n, cam_mask in [
-        ("Izq", izq_start, n_izq, person_mask_izq),
-        ("Der", der_start, n_der, person_mask_der),
+        ("Izq",     izq_start,     n_izq,     person_mask_izq),
+        ("Der",     der_start,     n_der,     person_mask_der),
+        ("Cenital", cenital_start, n_cenital, person_mask_cen),
     ]:
         result["detections"][cam_name] = None
         if cam_n == 0:
@@ -347,8 +350,14 @@ def process_capture(
             print(f"    [{cam_name}] PNG unreadable (possibly truncated) — skip")
             continue
 
-        # YOLO detection
-        det = best_person_detection(img_bgr, conf=CONF_THRESH)
+        # YOLO detection (Cenital uses a lower threshold).
+        # For lateral cameras, retry at lower conf if high-conf failed.
+        conf_thr = CONF_THRESH_CENITAL if cam_name == "Cenital" else CONF_THRESH
+        det = best_person_detection(img_bgr, conf=conf_thr)
+        if det is None and cam_name != "Cenital":
+            det = best_person_detection(img_bgr, conf=0.3)
+            if det is not None:
+                print(f"    [{cam_name}] retry@0.3 → conf={det['conf']:.3f}")
         if det is None:
             print(f"    [{cam_name}] no person detected (conf>{CONF_THRESH})")
             continue
@@ -401,6 +410,11 @@ def process_capture(
     end = min(der_end, n_total)
     if end > der_start:
         global_mask[der_start:end] = person_mask_der[:end - der_start]
+
+    # Cenital range
+    end = min(cenital_end, n_total)
+    if end > cenital_start:
+        global_mask[cenital_start:end] = person_mask_cen[:end - cenital_start]
 
     n_removed = int(global_mask.sum())
     result["n_removed"] = n_removed
