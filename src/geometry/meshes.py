@@ -19,6 +19,19 @@ JACK_FORK_L:  float = 1.15   # fork length in +Z direction
 JACK_BODY_D:  float = 0.40   # body depth in -Z direction
 JACK_X_HALF:  float = 0.35   # half-width of full vehicle bounding box
 
+# Carretilla elevadora (forklift) geometry constants.
+# Derived from data/carretilla.stl:
+#   STL units: mm.  BBox (mm): X=[−0,1270], Y=[0,2785], Z=[−95,3978].
+#   After scale=0.001 and placement (forks assumed at Z_max, fork root → world Z=0):
+#     X: [−0.635, +0.635]  (width 1.27 m, centred)
+#     Y: [0, 2.785]        (height; Y_min=0 already sits on floor)
+#     Z: [−2.97, +1.10]    (body in −Z, forks in +Z)
+# FORKLIFT_FORK_L / FORKLIFT_FORK_H are physical estimates — verify visually.
+FORKLIFT_FORK_H:  float = 0.25   # approx fork platform height when forks lowered (m)
+FORKLIFT_FORK_L:  float = 1.10   # estimated fork length in +Z direction (m)
+FORKLIFT_BODY_D:  float = 2.97   # body depth in −Z: total_len(4.07) − FORK_L(1.10)
+FORKLIFT_X_HALF:  float = 0.635  # half-width (STL X extent 1.270 m, centred at 0)
+
 
 def make_pallet_mesh() -> o3d.geometry.TriangleMesh:
     """EUR pallet with realistic top-deck slat geometry.
@@ -205,6 +218,38 @@ def make_pallet_jack_mesh() -> o3d.geometry.TriangleMesh:
     bar.translate([-bar_w / 2, arm_y0 + arm_h - arm_w, tiller_z0])
 
     return body + fork_l + fork_r + arm_l + arm_r + bar
+
+
+def load_carretilla(stl_path: str) -> o3d.geometry.TriangleMesh:
+    """Load carretilla elevadora STL (mm) and place it in world frame.
+
+    Normalisation applied:
+      • scale 0.001  (mm → m)
+      • centre X so vehicle is symmetric around X=0
+      • keep Y as-is (STL already has Y_min=0, sits on floor)
+      • translate Z so fork root lands at world Z=0
+        (forks are at Z_max of the STL → fork root = Z_max − FORKLIFT_FORK_L)
+
+    After transform:
+      forks : Z ∈ [0,  FORKLIFT_FORK_L]  (+Z, toward cargo/pallet)
+      body  : Z ∈ [−FORKLIFT_BODY_D, 0]  (−Z, away from cargo)
+      X     : [−FORKLIFT_X_HALF, +FORKLIFT_X_HALF]
+      Y     : [0, ~2.785]                 (on floor)
+
+    If FORKLIFT_FORK_L or FORKLIFT_FORK_H are imprecise (physical estimates),
+    verify visually with CloudCompare and adjust constants at top of file.
+    """
+    fk = o3d.io.read_triangle_mesh(stl_path)
+    fk.scale(0.001, center=(0.0, 0.0, 0.0))   # mm → m
+    fk.compute_vertex_normals()
+    verts = np.asarray(fk.vertices)
+    x_center = (verts[:, 0].max() + verts[:, 0].min()) / 2.0
+    y_min    =  verts[:, 1].min()
+    z_max    =  verts[:, 2].max()
+    # Fork root assumed at z_max − FORKLIFT_FORK_L; shift it to world Z=0.
+    z_translate = -(z_max - FORKLIFT_FORK_L)
+    fk.translate([-x_center, -y_min, z_translate])
+    return fk
 
 
 def load_forklift(stl_path: str) -> o3d.geometry.TriangleMesh:

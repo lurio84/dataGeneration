@@ -58,7 +58,7 @@ CFG = {
     "flat_min_h":    0.03,  # m  min height in flat-cargo mode (overrides box_min_h / cyl_min_h)
     "flat_max_h":    0.15,  # m  max height in flat-cargo mode
     "p_person":     0.30,   # 30% de escenas tienen persona
-    "p_forklift":   0.00,   # disabled; always use primitive traspaleta
+    "p_forklift":   0.00,   # prob carretilla instead of pallet jack (0=always jack)
     "p_pallet":     0.80,   # EUR pallet present under cargo (20% sin pallet)
     "p_cargo_on_vehicle": 0.50,  # cuando no hay pallet: prob. de cargo sobre horcas
     "enable_floor": True,   # include floor plane points
@@ -92,6 +92,10 @@ CFG = {
     "pts_box":       80_000,
     "pts_forklift": 100_000,
     "pts_person":    30_000,
+
+    # ── Forklift (carretilla elevadora) STL ──
+    # Path relative to src/, or absolute.  Empty string → no STL loaded (always jack).
+    "forklift_stl": "../data/carretilla.stl",
 }
 
 # ── Submodule imports (B9 refactor) ───────────────────────────────────────────
@@ -100,8 +104,11 @@ from ply_io.ply import (
 )
 from geometry.meshes import (
     EUR_W, EUR_H, EUR_D,
+    JACK_FORK_H, JACK_FORK_L, JACK_BODY_D, JACK_X_HALF,
+    FORKLIFT_FORK_H, FORKLIFT_FORK_L, FORKLIFT_BODY_D, FORKLIFT_X_HALF,
     make_pallet_mesh, make_box_mesh, make_cylinder_mesh,
-    make_primitive_mesh, make_person_mesh, make_pallet_jack_mesh, load_forklift,
+    make_primitive_mesh, make_person_mesh, make_pallet_jack_mesh,
+    load_forklift, load_carretilla,
 )
 from geometry.composition import (
     _spec_w, _spec_d, sample_cargo_spec, compose_cargo, compose_cargo_on_vehicle,
@@ -117,7 +124,8 @@ __all__ = [
     "LABEL", "LABEL_RGB",
     "EUR_W", "EUR_H", "EUR_D",
     "make_pallet_mesh", "make_box_mesh", "make_cylinder_mesh",
-    "make_primitive_mesh", "make_person_mesh", "make_pallet_jack_mesh", "load_forklift",
+    "make_primitive_mesh", "make_person_mesh", "make_pallet_jack_mesh",
+    "load_forklift", "load_carretilla",
     "_spec_w", "_spec_d", "sample_cargo_spec", "compose_cargo", "compose_cargo_on_vehicle",
     "sample_labeled", "sample_floor",
     "camera_arc_filter", "apply_distance_density", "degrade_labeled",
@@ -167,6 +175,17 @@ def generate_scene(
         floor_pts = np.empty((0, 3), dtype=np.float32)
         floor_lbs = np.empty(0, dtype=np.uint8)
 
+    # ── Vehicle type selection (first, so fork constants are known for all placements) ──
+    # Per scene, either pallet jack (traspaleta) or carretilla elevadora — never both.
+    is_forklift = (
+        forklift_mesh is not None
+        and rng.random() < cfg.get("p_forklift", 0.0)
+    )
+    v_fork_h = FORKLIFT_FORK_H if is_forklift else JACK_FORK_H
+    v_fork_l = FORKLIFT_FORK_L if is_forklift else JACK_FORK_L
+    v_body_d = FORKLIFT_BODY_D if is_forklift else JACK_BODY_D
+    v_x_half = FORKLIFT_X_HALF if is_forklift else JACK_X_HALF
+
     # ── Object point lists (will be FOV-filtered) ──
     obj_pts: list[np.ndarray] = []
     obj_lbs: list[np.ndarray] = []
@@ -176,9 +195,12 @@ def generate_scene(
     pallet_top_y = 0.0
     if has_pallet:
         pm = make_pallet_mesh()
+        if is_forklift:
+            # Forklift carries the pallet on its forks: lift pallet to fork platform height.
+            pm.translate([0.0, v_fork_h, 0.0])
         pp, pl = sample_labeled(pm, LABEL["pallet"], cfg["pts_pallet"])
         obj_pts.append(pp); obj_lbs.append(pl)
-        pallet_top_y = EUR_H
+        pallet_top_y = (v_fork_h if is_forklift else 0.0) + EUR_H
         meta["objects"].append("pallet")
 
     # ── Cargo (primary + optional secondary) ──
@@ -219,7 +241,7 @@ def generate_scene(
     )
     if has_cargo_on_vehicle:
         # BBB-5 scenario: cargo placed directly on fork tops, no pallet beneath.
-        mesh, placed = compose_cargo_on_vehicle(specs[0], rng)
+        mesh, placed = compose_cargo_on_vehicle(specs[0], rng, fork_h=v_fork_h, fork_l=v_fork_l)
         cargo_items = [(mesh, placed)]
     else:
         cargo_items, cargo_back_z = compose_cargo(specs, compose_mode, pallet_top_y, rng)
@@ -230,45 +252,71 @@ def generate_scene(
         obj_lbs.append(lbs_c)
         meta["objects"].append({f"cargo{i + 1}": placed})
 
-    # ── Pallet jack (always present) ──
-    # Origin of make_pallet_jack_mesh: body-front / fork-root at (X=0, Y=0, Z=0).
-    # Forks extend in +Z (toward cargo/pallet front), body extends in -Z.
-    #
-    # Jack front anchor: placed behind the cargo back face with a minimum gap
-    # large enough that Gaussian noise (σ=30mm) from both primitives does not
-    # cause visible interpenetration.  min_gap = 3×noise_std ≈ 0.10 m.
-    # With pallet: also respect the pallet back face (Z = -EUR_D/2 = -0.40m) —
-    # whichever is further back wins so forks always fit under the pallet.
-    MIN_JACK_GAP = 0.10          # m  (> 3 × noise_std=0.030 m)
-    JACK_PALLET_CLEARANCE = 0.02  # m  avoids noise-overlap at pallet back face
+    # ── Vehicle (traspaleta o carretilla elevadora — mutuamente exclusivas) ──
+    # Vehicle origin: fork-root at (X=0, Y=0, Z=0).
+    # Forks extend in +Z (toward cargo/pallet), body in -Z (operator side).
+    # vehicle_front_z: world Z of the fork root for this scene.
+    MIN_VEHICLE_GAP       = 0.10   # m  (> 3 × noise_std=0.030 m)
+    VEHICLE_PALLET_CLEAR  = 0.02   # m  avoids noise-overlap at pallet back face
     if has_pallet:
-        # Jack carries the pallet — always anchored slightly behind the pallet back face.
-        jack_front_z = -EUR_D / 2 - JACK_PALLET_CLEARANCE  # = -0.42 m, fixed
+        vehicle_front_z = -EUR_D / 2 - VEHICLE_PALLET_CLEAR   # = -0.42 m, fixed
     elif has_cargo_on_vehicle:
-        # Cargo is on the forks — jack stays at world origin (forks at Z=0..JACK_FORK_L)
-        jack_front_z = 0.0
+        vehicle_front_z = 0.0
     else:
-        # No pallet, cargo on floor — jack behind cargo back face with noise gap
-        jack_front_z = cargo_back_z - MIN_JACK_GAP
+        # Cargo is on the floor. Jack forks (h=6 cm) can slide under floor-level cargo,
+        # but forklift forks (h=25 cm) cannot — park them fully behind the cargo back face
+        # so fork tips stop at cargo_back_z − MIN_VEHICLE_GAP.
+        if is_forklift:
+            vehicle_front_z = cargo_back_z - MIN_VEHICLE_GAP - v_fork_l
+        else:
+            vehicle_front_z = cargo_back_z - MIN_VEHICLE_GAP
 
-    tj = make_pallet_jack_mesh()
-    tj.translate([0.0, 0.0, jack_front_z])
-    vp, vl = sample_labeled(tj, LABEL["vehicle"], cfg["pts_forklift"] // 3)
+    if is_forklift:
+        vm = o3d.geometry.TriangleMesh(forklift_mesh)   # shallow copy; shared vertices/triangles
+        vm.translate([0.0, 0.0, vehicle_front_z])
+        n_pts_v = cfg["pts_forklift"]
+        v_type  = "forklift"
+    else:
+        vm = make_pallet_jack_mesh()
+        vm.translate([0.0, 0.0, vehicle_front_z])
+        n_pts_v = cfg["pts_forklift"] // 3
+        v_type  = "pallet_jack"
+
+    vp, vl = sample_labeled(vm, LABEL["vehicle"], n_pts_v)
     obj_pts.append(vp); obj_lbs.append(vl)
-    meta["objects"].append({"pallet_jack": {"front_z": round(jack_front_z, 3)}})
+    meta["objects"].append({"vehicle": {"type": v_type, "front_z": round(vehicle_front_z, 3)}})
+
+    # ── Extra floor under forklift body (extends beyond standard floor_extent_z) ──
+    # The forklift cab reaches vehicle_front_z - v_body_d ≈ -3.4 m, beyond the
+    # default floor_extent_z = 2.0 m. Add a floor patch to fill this gap.
+    if is_forklift and cfg.get("enable_floor", True):
+        body_z_min = vehicle_front_z - v_body_d   # rear of cab in world Z
+        std_floor_z = -cfg["floor_extent_z"]       # existing floor boundary
+        if body_z_min < std_floor_z:
+            extra_len  = std_floor_z - body_z_min + 0.3   # +0.3 m margin
+            extra_width = cfg["floor_extent_x"] * 2       # same full width as main floor
+            n_extra = int(cfg["pts_floor"] * (extra_len * extra_width)
+                          / (cfg["floor_extent_x"] * 2 * cfg["floor_extent_z"] * 2))
+            n_extra = max(n_extra, 5_000)
+            ex = rng.uniform(-extra_width / 2, extra_width / 2, n_extra).astype(np.float32)
+            ez = rng.uniform(body_z_min - 0.3, std_floor_z, n_extra).astype(np.float32)
+            ey = np.zeros(n_extra, dtype=np.float32)
+            extra_floor_pts = np.stack([ex, ey, ez], axis=1)
+            extra_floor_lbs = np.zeros(n_extra, dtype=np.uint8)
+            floor_pts = np.vstack([floor_pts, extra_floor_pts])
+            floor_lbs = np.concatenate([floor_lbs, extra_floor_lbs])
 
     # ── Persona (opcional) ──
-    # Zona operario: detrás del cuerpo del jack (operario empuja desde ahí).
-    # Jack body en mundo: X=[-0.35,+0.35], Z=[jack_front_z-0.40, jack_front_z+1.15].
+    # Zona operario: detrás del cuerpo del vehículo.
+    # Vehicle bbox en mundo: X=[−v_x_half, +v_x_half],
+    #   Z=[vehicle_front_z − v_body_d, vehicle_front_z + v_fork_l].
     if rng.random() < cfg["p_person"]:
         PERSON_R = 0.30    # radio huella persona (m)
-        BODY_D   = 0.40    # profundidad cuerpo jack (m)
-        FORK_L   = 1.15    # longitud horquillas jack (m)
         MAX_TRY  = 20
-        jack_xmin = -0.35
-        jack_xmax = +0.35
-        jack_zmin = jack_front_z - BODY_D   # cara trasera del cuerpo
-        jack_zmax = jack_front_z + FORK_L   # punta de las horquillas
+        vehicle_xmin = -v_x_half
+        vehicle_xmax = +v_x_half
+        vehicle_zmin = vehicle_front_z - v_body_d   # cara trasera del cuerpo
+        vehicle_zmax = vehicle_front_z + v_fork_l   # punta de las horquillas
 
         p_height = float(rng.uniform(1.70, 1.80))
         p_rot    = float(rng.uniform(0.0, 360.0))
@@ -279,8 +327,8 @@ def generate_scene(
         if use_operator:
             for _ in range(MAX_TRY):
                 cx = float(rng.uniform(-0.50, +0.50))
-                cz = float(jack_zmin - rng.uniform(0.30, 0.70))
-                if _person_no_collision(cx, cz, PERSON_R, jack_xmin, jack_xmax, jack_zmin, jack_zmax):
+                cz = float(vehicle_zmin - rng.uniform(0.30, 0.70))
+                if _person_no_collision(cx, cz, PERSON_R, vehicle_xmin, vehicle_xmax, vehicle_zmin, vehicle_zmax):
                     px, pz = cx, cz
                     break
 
@@ -291,7 +339,7 @@ def generate_scene(
                 r     = half_diag + float(rng.uniform(0.30, 0.70))
                 cx    = float(r * np.cos(theta))
                 cz    = float(r * np.sin(theta))
-                if _person_no_collision(cx, cz, PERSON_R, jack_xmin, jack_xmax, jack_zmin, jack_zmax):
+                if _person_no_collision(cx, cz, PERSON_R, vehicle_xmin, vehicle_xmax, vehicle_zmin, vehicle_zmax):
                     px, pz = cx, cz
                     break
 
@@ -370,9 +418,10 @@ def parse_args(cfg: dict) -> dict:
     p.add_argument("--p-flat-cargo",  type=float, default=cfg["p_flat_cargo"],  metavar="P", help="Prob very flat/low cargo (≤flat-max-h)           (default: %(default)s)")
     p.add_argument("--flat-min-h",    type=float, default=cfg["flat_min_h"],    metavar="M", help="Min height for flat-cargo mode (m)               (default: %(default)s)")
     p.add_argument("--flat-max-h",    type=float, default=cfg["flat_max_h"],    metavar="M", help="Max height for flat-cargo mode (m)               (default: %(default)s)")
-    p.add_argument("--p-person",     type=float, default=cfg["p_person"],     metavar="P", help="Prob person in scene   (default: %(default)s)")
-    p.add_argument("--p-forklift",   type=float, default=cfg["p_forklift"],   metavar="P", help="Prob forklift in scene (default: %(default)s)")
-    p.add_argument("--p-pallet",     type=float, default=cfg["p_pallet"],     metavar="P", help="Prob EUR pallet base   (default: %(default)s)")
+    p.add_argument("--p-person",     type=float, default=cfg["p_person"],     metavar="P", help="Prob person in scene                     (default: %(default)s)")
+    p.add_argument("--p-forklift",   type=float, default=cfg["p_forklift"],   metavar="P", help="Prob carretilla instead of pallet jack   (default: %(default)s)")
+    p.add_argument("--p-pallet",     type=float, default=cfg["p_pallet"],     metavar="P", help="Prob EUR pallet base                      (default: %(default)s)")
+    p.add_argument("--forklift-stl", type=str,   default=cfg["forklift_stl"],              help="Path to carretilla STL, relative to src/  (default: %(default)s)")
     # Cylinder cargo
     p.add_argument("--p-cylinder",   type=float, default=cfg["p_cylinder"],  metavar="P", help="Prob cylinder instead of box  (default: %(default)s)")
     p.add_argument("--cyl-min-r",    type=float, default=cfg["cyl_min_r"],   metavar="M", help="Min cylinder radius (default: %(default)s)")
@@ -406,6 +455,7 @@ def parse_args(cfg: dict) -> dict:
     cfg["p_person"]       = args.p_person
     cfg["p_forklift"]     = args.p_forklift
     cfg["p_pallet"]       = args.p_pallet
+    cfg["forklift_stl"]   = args.forklift_stl
     cfg["p_cylinder"]     = args.p_cylinder
     cfg["cyl_min_r"]      = args.cyl_min_r
     cfg["cyl_max_r"]      = args.cyl_max_r
@@ -436,10 +486,16 @@ def run_generation(
     """
     rng = np.random.default_rng(cfg["seed"])
 
-    stl_path = Path(__file__).parent.parent / "data" / "forklift.stl"
     forklift_mesh: o3d.geometry.TriangleMesh | None = None
-    if stl_path.exists():
-        forklift_mesh = load_forklift(str(stl_path))
+    stl_cfg = cfg.get("forklift_stl", "")
+    if stl_cfg:
+        stl_path = (Path(__file__).parent / stl_cfg).resolve()
+        if stl_path.exists():
+            forklift_mesh = load_carretilla(str(stl_path))
+        elif cfg.get("p_forklift", 0.0) > 0.0:
+            raise FileNotFoundError(
+                f"p_forklift={cfg['p_forklift']} but carretilla STL not found: {stl_path}"
+            )
 
     Path(cfg["output_dir"]).mkdir(parents=True, exist_ok=True)
 
@@ -467,11 +523,15 @@ def main() -> None:
     )
     cfg = parse_args(CFG)
 
-    stl_path = Path(__file__).parent.parent / "data" / "forklift.stl"
-    if stl_path.exists():
-        log.info("Loading forklift STL from %s", stl_path)
-    else:
-        log.warning("forklift.stl not found at %s, using primitive traspaleta instead.", stl_path)
+    _stl_cfg = cfg.get("forklift_stl", "")
+    if _stl_cfg:
+        _stl_p = (Path(__file__).parent / _stl_cfg).resolve()
+        if _stl_p.exists():
+            log.info("Carretilla STL: %s  (p_forklift=%.2f)", _stl_p, cfg.get("p_forklift", 0.0))
+        elif cfg.get("p_forklift", 0.0) > 0.0:
+            log.error("STL no encontrado: %s — se usará traspaleta", _stl_p)
+        else:
+            log.info("STL no encontrado (%s); p_forklift=0 → siempre traspaleta", _stl_p)
 
     log.info("Generating %d scenes → %s", cfg['n_samples'], cfg['output_dir'])
     log.info("  noise=%.3fm  dropout=%.2f  voxel=%.3fm", cfg['noise_std'], cfg['dropout_ratio'], cfg['voxel_size'])

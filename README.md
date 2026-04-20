@@ -22,20 +22,41 @@ pip install -r requirements.txt
 ```
 datageneration/
 ├── src/
-│   ├── generate_dataset.py   ← main generator (CLI + importable)
-│   ├── app.py                ← Streamlit UI
-│   ├── preview_grid.py       ← generate one PNG per scene (3 views)
-│   ├── analyze.py            ← statistical comparison vs real data
-│   └── test_pipeline.py      ← pytest test suite (70 tests)
+│   ├── generate_dataset.py        ← main generator (CLI + importable)
+│   ├── geometry/
+│   │   ├── meshes.py              ← mesh builders: pallet, cargo, jack, carretilla, person
+│   │   └── composition.py        ← cargo placement logic
+│   ├── sensor/noise.py            ← sampling, sensor degradation, camera filter
+│   ├── ply_io/ply.py              ← PLY export (label→RGB, save_ply)
+│   ├── classifier/                ← 5-class ML classifier (train/predict/evaluate)
+│   ├── app.py                     ← Streamlit UI
+│   ├── utils/preview_grid.py      ← PNG previews (3 views)
+│   ├── analyze.py                 ← comparison vs real FUSION3D captures
+│   └── test_pipeline.py           ← pytest test suite (101 tests)
 ├── data/
-│   └── forklift.stl          ← forklift mesh (optional, falls back to primitive)
+│   ├── carretilla.stl             ← forklift STL used by --p-forklift
+│   ├── forklift.stl               ← legacy forklift mesh (kept for reference)
+│   └── person.stl                 ← person scan (optional; fallback: cylinder+sphere)
+├── docs/
+│   └── ADDING_ASSETS.md           ← step-by-step guide for adding new STL assets
 ├── output/
-│   ├── dataset/              ← generated PLY files + metadata.json
-│   ├── previews/             ← PNG previews
-│   └── analysis/             ← comparison figures vs real data
-├── DECISIONS.md              ← design decisions log
+│   ├── dataset/                   ← generated PLY files + metadata.json
+│   ├── previews/                  ← PNG previews
+│   └── analysis/                  ← comparison figures vs real data
+├── DECISIONS.md                   ← design decisions log
 └── requirements.txt
 ```
+
+## Vehicles available
+
+Each scene contains exactly one vehicle (mutually exclusive):
+
+| Vehicle | Type key in metadata | How selected |
+|---------|---------------------|--------------|
+| Traspaleta (pallet jack) | `pallet_jack` | default; when `--p-forklift` not hit |
+| Carretilla elevadora (forklift) | `forklift` | when `rng < --p-forklift` and `--forklift-stl` exists |
+
+To add more vehicle types, see [docs/ADDING_ASSETS.md](docs/ADDING_ASSETS.md).
 
 ## Generate dataset
 
@@ -61,6 +82,12 @@ python3 generate_dataset.py --n 100 --p-flat-cargo 0.3
 
 # Adjust sensor noise (defaults calibrated to real FUSION3D)
 python3 generate_dataset.py --noise 0.030 --dropout 0.15 --voxel 0.019
+
+# Carretilla elevadora in every scene (requires data/carretilla.stl)
+python3 generate_dataset.py --n 100 --p-forklift 1.0
+
+# Mix: 50% pallet jack, 50% carretilla
+python3 generate_dataset.py --n 200 --p-forklift 0.5
 ```
 
 ### All options
@@ -81,7 +108,8 @@ python3 generate_dataset.py --noise 0.030 --dropout 0.15 --voxel 0.019
 | `--flat-min-h` | 0.03 | Min height in flat-cargo mode (m) |
 | `--flat-max-h` | 0.15 | Max height in flat-cargo mode (m) |
 | `--p-person` | 0.0 | Probability of person in scene |
-| `--p-forklift` | 0.0 | Probability of forklift STL (requires `data/forklift.stl`) |
+| `--p-forklift` | 0.0 | Probability of carretilla elevadora instead of pallet jack |
+| `--forklift-stl` | `../data/carretilla.stl` | Path to forklift STL (relative to `src/`) |
 | `--box-min-w` | 0.30 | Min cargo box X width (m) |
 | `--box-max-w` | 1.00 | Max cargo box X width (m) |
 | `--box-min-d` | 0.30 | Min cargo box Z depth (m) |
@@ -159,7 +187,7 @@ cd src/
 python3 -m pytest test_pipeline.py -v
 ```
 
-87 tests covering geometry, PLY output, scene composition (single/stacked/tandem), flat-cargo mode, sensor degradation, previews, UI defaults, and 5-class ML classifier (features, training, inference).
+101 tests covering geometry, PLY output, scene composition (single/stacked/tandem), flat-cargo mode, sensor degradation, previews, UI defaults, carretilla elevadora STL, and 5-class ML classifier (features, training, inference).
 
 ```bash
 cd src/

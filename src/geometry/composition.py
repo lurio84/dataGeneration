@@ -143,11 +143,20 @@ def compose_cargo(
     raise ValueError(f"Unknown compose mode: {mode!r}")
 
 
-def compose_cargo_on_vehicle(spec: dict, rng) -> tuple:
-    """Position a single cargo primitive on top of the jack forks.
+def compose_cargo_on_vehicle(
+    spec: dict,
+    rng,
+    *,
+    fork_h: float = JACK_FORK_H,
+    fork_l: float = JACK_FORK_L,
+) -> tuple:
+    """Position a single cargo primitive on top of vehicle forks.
 
-    The pallet jack origin is (X=0, Y=0, Z=0) — forks extend in +Z from 0 to JACK_FORK_L.
-    Cargo base sits at Y=JACK_FORK_H; centre is randomised within the fork footprint.
+    Vehicle origin is (X=0, Y=0, Z=0) — forks extend in +Z from 0 to fork_l.
+    Cargo base sits at Y=fork_h; centre is randomised within the fork footprint.
+
+    fork_h / fork_l default to JACK_FORK_H / JACK_FORK_L for the pallet jack;
+    pass FORKLIFT_FORK_H / FORKLIFT_FORK_L when using the carretilla elevadora.
 
     Returns
     -------
@@ -156,10 +165,10 @@ def compose_cargo_on_vehicle(spec: dict, rng) -> tuple:
     """
     d = _spec_d(spec)
     oz_min = d / 2
-    oz_max = max(oz_min, JACK_FORK_L - d / 2)
+    oz_max = max(oz_min, fork_l - d / 2)
     oz = float(rng.uniform(oz_min, oz_max))
     ox = float(rng.uniform(-0.20, 0.20))
     mesh = make_primitive_mesh(spec)
-    mesh.translate([ox, JACK_FORK_H, oz])
-    placed = {**spec, "ox": round(ox, 4), "oy": round(JACK_FORK_H, 4), "oz": round(oz, 4)}
+    mesh.translate([ox, fork_h, oz])
+    placed = {**spec, "ox": round(ox, 4), "oy": round(fork_h, 4), "oz": round(oz, 4)}
     return mesh, placed

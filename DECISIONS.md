@@ -716,6 +716,56 @@ Son dos problemas separados; ningún parche de scoring los resuelve simultáneam
 
 Sesión parada aquí para no seguir parcheando sin plan.
 
+---
+
+## §18. Añadir carretilla elevadora (STL) como vehículo alternativo
+
+**Estado: ✅ Implementado (2026-04-20)**
+
+### Motivación
+
+En entornos reales BBB la carretilla elevadora aparece frecuentemente junto con la traspaleta manual. Para mejorar la diversidad del dataset de entrenamiento y reducir el riesgo de overfitting a la geometría de la traspaleta, se añade la carretilla elevadora como vehículo generado con STL.
+
+El STL fue proporcionado por el cliente (`Carretilla_elevadora (reduced).STL`, ~50 MB).
+
+### Decisión: STL sin git-lfs
+
+Se commitea directamente el STL al repo (~50 MB) en lugar de usar git-lfs porque:
+- La mayoría de compañeros no tienen git-lfs instalado y añadir dependencias al workflow de clonado aumenta la fricción.
+- 50 MB es tolerable en un repo interno no distribuido (sin GitHub Pages ni pipelines de CI/CD que descarguen el repo por completo).
+- Si en el futuro se acumulan más STLs grandes (>200 MB total), reconsiderar git-lfs.
+
+### Decisión: mutex traspaleta / carretilla por escena
+
+Cada escena tiene exactamente un vehículo. La probabilidad `p_forklift` controla la carretilla; su complemento da la traspaleta. Alternativas descartadas:
+
+- **Ambos en la misma escena**: complica el posicionamiento, genera oclusiones artificiales, y los escenarios reales raramente muestran ambos simultáneamente.
+- **Tres modos (jack / forklift / ninguno)**: introduce escenas sin vehículo, lo que puede confundir el clasificador en producción donde siempre hay vehículo visible.
+
+### Decisión: constantes FORKLIFT_* hardcodeadas (no computadas en runtime)
+
+`FORKLIFT_FORK_H`, `FORKLIFT_FORK_L`, `FORKLIFT_BODY_D`, `FORKLIFT_X_HALF` están en `geometry/meshes.py` como constantes físicas estimadas. Alternativa descartada: computarlas desde el bbox en cada carga.
+
+Razón: el STL no tiene metadata sobre dónde están exactamente las horquillas — el bbox da dimensiones totales del vehículo pero no distingue cab de forks. Las constantes físicas (1.10 m de horquilla, 0.25 m de altura) son estimaciones deliberadas, verificadas visualmente, y se entienden mejor como especificación explícita que como derivación implícita.
+
+**Si el STL cambia**, actualizar las constantes en `geometry/meshes.py` y re-verificar visualmente.
+
+### Decisión: `data/forklift.stl` legacy se conserva
+
+El STL legacy (915 KB) permanece en el repo sin ser el default. Razones: conservar la historia del proyecto; `load_forklift()` permanece como referencia para futuros loaders; no hay coste real de conservarlo.
+
+### Lógica de `cargo_on_vehicle`
+
+`compose_cargo_on_vehicle` recibe `fork_h` y `fork_l` como keyword arguments (default = constantes del jack). La llamada en `generate_scene()` pasa `v_fork_h` / `v_fork_l` del vehículo seleccionado, lo que garantiza que el cargo se apoye a la altura correcta de las horquillas independientemente del vehículo.
+
+### Zona de persona
+
+Las variables `vehicle_xmin/xmax/zmin/zmax` en `generate_scene()` se calculan desde `v_x_half`, `v_body_d`, `v_fork_l` y `vehicle_front_z`. Con el jack, los valores son idénticos a los anteriores; con la carretilla, la zona se amplía (~0.635 m de semiancho, ~2.97 m de cuerpo).
+
+### Cómo añadir más vehículos
+
+Ver `docs/ADDING_ASSETS.md`.
+
 
 
 

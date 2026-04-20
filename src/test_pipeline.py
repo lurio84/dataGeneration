@@ -316,11 +316,13 @@ class TestSceneComposition(unittest.TestCase):
     def test_jack_always_present(self):
         meta = self._run()
         for m in meta:
-            has_jack = any(
-                isinstance(o, dict) and "pallet_jack" in o
-                for o in m["objects"]
+            vehicle_obj = next(
+                (o["vehicle"] for o in m["objects"] if isinstance(o, dict) and "vehicle" in o),
+                None,
             )
-            self.assertTrue(has_jack, "pallet_jack no encontrado en la escena")
+            self.assertIsNotNone(vehicle_obj, "vehicle no encontrado en la escena")
+            self.assertEqual(vehicle_obj["type"], "pallet_jack",
+                             "sin p_forklift, el vehículo debe ser pallet_jack")
 
     def test_multi_cargo_activated(self):
         """Con p_multi_cargo=1.0 todas las escenas deben tener cargo1 y cargo2."""
@@ -943,7 +945,7 @@ class TestCargoOnVehicle(unittest.TestCase):
         self.assertLessEqual(placed["ox"],  0.20)
 
     def test_no_pallet_scene_generates(self):
-        """p_pallet=0: escena sin pallet contiene cargo y pallet_jack."""
+        """p_pallet=0: escena sin pallet contiene cargo y vehicle."""
         with tempfile.TemporaryDirectory() as tmp:
             cfg = _minimal_cfg(tmp, p_pallet=0.0, p_cargo_on_vehicle=1.0)
             meta = run_generation(cfg)
@@ -953,10 +955,10 @@ class TestCargoOnVehicle(unittest.TestCase):
                     isinstance(o, dict) and "cargo1" in o for o in m["objects"]
                 )
                 self.assertTrue(has_cargo, "cargo1 no encontrado en escena sin pallet")
-                has_jack = any(
-                    isinstance(o, dict) and "pallet_jack" in o for o in m["objects"]
+                has_vehicle = any(
+                    isinstance(o, dict) and "vehicle" in o for o in m["objects"]
                 )
-                self.assertTrue(has_jack, "pallet_jack no encontrado en escena sin pallet")
+                self.assertTrue(has_vehicle, "vehicle no encontrado en escena sin pallet")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1232,6 +1234,101 @@ class TestHeightFieldVolume(unittest.TestCase):
                            "flat cargo volume must not be zero")
         self.assertGreater(res["n_cells"], 0,
                            "flat cargo cells must not be suppressed")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 12. Carretilla elevadora (forklift STL)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestCarretillaForklift(unittest.TestCase):
+    """Tests for load_carretilla() and forklift integration in generate_scene."""
+
+    STL_PATH = str(Path(__file__).parent.parent / "data" / "carretilla.stl")
+
+    def _stl_available(self) -> bool:
+        return Path(self.STL_PATH).exists()
+
+    def test_load_carretilla_bbox(self):
+        """load_carretilla: Y_min≈0, forks in +Z, body in −Z, width reasonable."""
+        from geometry.meshes import load_carretilla, FORKLIFT_FORK_L, FORKLIFT_BODY_D, FORKLIFT_X_HALF
+        if not self._stl_available():
+            self.skipTest("carretilla.stl not found")
+        mesh = load_carretilla(self.STL_PATH)
+        verts = np.asarray(mesh.vertices)
+        self.assertAlmostEqual(verts[:, 1].min(), 0.0, delta=0.01,
+                               msg="Y_min should be ≈0 (on floor)")
+        # Forks should reach ≈ +FORKLIFT_FORK_L in +Z
+        self.assertGreater(verts[:, 2].max(), FORKLIFT_FORK_L * 0.5,
+                           msg="Fork tips should extend in +Z")
+        # Body extends in −Z
+        self.assertLess(verts[:, 2].min(), -FORKLIFT_BODY_D * 0.5,
+                        msg="Body should extend in −Z")
+        # Width check: roughly within factor-2 of FORKLIFT_X_HALF
+        x_half_actual = (verts[:, 0].max() - verts[:, 0].min()) / 2
+        self.assertAlmostEqual(x_half_actual, FORKLIFT_X_HALF, delta=FORKLIFT_X_HALF * 0.5,
+                               msg="X half-width should be near FORKLIFT_X_HALF")
+
+    def test_scene_with_p_forklift_1_has_forklift_type(self):
+        """p_forklift=1.0: every scene has vehicle.type == 'forklift' and label 2 points."""
+        if not self._stl_available():
+            self.skipTest("carretilla.stl not found")
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _minimal_cfg(tmp, p_forklift=1.0, seed=42, n_samples=3,
+                               forklift_stl=self.STL_PATH)
+            meta = run_generation(cfg)
+            for m in meta:
+                vehicle_obj = next(
+                    (o["vehicle"] for o in m["objects"] if isinstance(o, dict) and "vehicle" in o),
+                    None,
+                )
+                self.assertIsNotNone(vehicle_obj, "vehicle missing from meta")
+                self.assertEqual(vehicle_obj["type"], "forklift")
+                self.assertGreater(
+                    m["label_counts"].get("2", 0), 0,
+                    msg="label 2 (vehicle) must have points when forklift present",
+                )
+
+    def test_p_forklift_zero_always_pallet_jack(self):
+        """Default p_forklift=0: vehicle.type must always be 'pallet_jack'."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _minimal_cfg(tmp, p_forklift=0.0, seed=0, n_samples=5)
+            meta = run_generation(cfg)
+            for m in meta:
+                vehicle_obj = next(
+                    (o["vehicle"] for o in m["objects"] if isinstance(o, dict) and "vehicle" in o),
+                    None,
+                )
+                self.assertIsNotNone(vehicle_obj)
+                self.assertEqual(vehicle_obj["type"], "pallet_jack")
+
+    def test_forklift_jack_mutex(self):
+        """With p_forklift=0.5: no scene should have both 'forklift' and 'pallet_jack'."""
+        if not self._stl_available():
+            self.skipTest("carretilla.stl not found")
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _minimal_cfg(tmp, p_forklift=0.5, seed=7, n_samples=20,
+                               forklift_stl=self.STL_PATH)
+            meta = run_generation(cfg)
+            for m in meta:
+                vehicle_entries = [
+                    o["vehicle"] for o in m["objects"]
+                    if isinstance(o, dict) and "vehicle" in o
+                ]
+                self.assertEqual(len(vehicle_entries), 1,
+                                 "exactly one vehicle per scene")
+
+    def test_cargo_on_forklift_fork_height(self):
+        """compose_cargo_on_vehicle with forklift fork constants: cargo.oy == FORKLIFT_FORK_H."""
+        from geometry.meshes import FORKLIFT_FORK_H, FORKLIFT_FORK_L
+        rng = np.random.default_rng(99)
+        spec = {"type": "box", "w": 0.50, "h": 0.60, "d": 0.40}
+        _mesh, placed = compose_cargo_on_vehicle(
+            spec, rng, fork_h=FORKLIFT_FORK_H, fork_l=FORKLIFT_FORK_L
+        )
+        self.assertAlmostEqual(placed["oy"], FORKLIFT_FORK_H, places=4,
+                               msg="cargo base should be at FORKLIFT_FORK_H")
+        self.assertGreaterEqual(placed["oz"], 0.0)
+        self.assertLessEqual(placed["oz"], FORKLIFT_FORK_L)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
