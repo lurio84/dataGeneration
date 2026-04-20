@@ -1,3 +1,0 @@
-config,seed,n_points_total,n_points_cv,cv_time_s,ram_peak_mb,f1_macro,f1_floor,f1_cargo,f1_vehicle,f1_person,f1_pallet
-A_baseline,42,6043680,1812910,97.1,1389.5,0.8542,0.972,0.9208,0.6689,0.8958,0.8133
-C_contextual,42,5000886,1500073,91.6,1665.3,0.8209,0.9488,0.9051,0.6181,0.8547,0.7779

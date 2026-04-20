@@ -52,14 +52,9 @@ src/
 │                            #   → vehicle selección: rng < p_forklift → carretilla, si no → jack
 ├── ply_io/ply.py            # LABEL, LABEL_RGB, save_ply, labels_to_rgb
 ├── geometry/
-│   ├── meshes.py            # Constructores de mallas:
-│   │                        #   make_pallet_mesh, make_box/cylinder_mesh
-│   │                        #   make_pallet_jack_mesh  (traspaleta procedural)
-│   │                        #   load_carretilla()      (STL data/carretilla.stl)
-│   │                        #   load_forklift()        (STL legacy data/forklift.stl)
-│   │                        #   make_person_mesh()     (STL data/person.stl o fallback)
-│   │                        #   Constantes: JACK_FORK_H/L/BODY_D/X_HALF
-│   │                        #              FORKLIFT_FORK_H/L/BODY_D/X_HALF
+│   ├── meshes.py            # make_pallet/box/cylinder/person_mesh, make_pallet_jack_mesh
+│   │                        # load_carretilla() (STL data/carretilla.stl)
+│   │                        # Constantes: JACK_*/FORKLIFT_* FORK_H/L/BODY_D/X_HALF
 │   └── composition.py       # sample_cargo_spec, compose_cargo (normal/stacked/tandem)
 │                            # compose_cargo_on_vehicle(spec, rng, *, fork_h, fork_l)
 ├── sensor/noise.py          # sample_labeled, sample_floor, camera_arc_filter, degrade_labeled
@@ -76,18 +71,14 @@ src/
 └── analyze.py               # comparación sintético vs real FUSION3D
 ```
 
-## Vehículos: traspaleta vs carretilla
+## Vehículos
 
-Por escena sale exactamente uno de los dos (mutuamente exclusivos):
+Un vehículo por escena, mutuamente exclusivos:
+- **Traspaleta** (`pallet_jack`): procedural, siempre disponible.
+- **Carretilla** (`forklift`): `load_carretilla()` desde `data/carretilla.stl`. Activar con `--p-forklift` > 0.
 
-- **Traspaleta** (`pallet_jack`): generada proceduralmente en `make_pallet_jack_mesh()`. Siempre disponible.
-- **Carretilla elevadora** (`forklift`): cargada desde `data/carretilla.stl` con `load_carretilla()`.  
-  Activada con `--p-forklift` > 0 (default 0).
-
-La lógica de `cargo_on_vehicle` y la zona de persona usan los mismos parámetros en ambos casos
-gracias a las constantes `JACK_*` / `FORKLIFT_*` exportadas desde `geometry/meshes.py`.
-
-Para añadir nuevos assets: ver `docs/ADDING_ASSETS.md`.
+`compose_cargo_on_vehicle` usa las mismas constantes `JACK_*` / `FORKLIFT_*` en ambos casos.
+Para añadir assets: `docs/ADDING_ASSETS.md`.
 
 ## Estado y tareas pendientes
 

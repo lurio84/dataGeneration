@@ -33,7 +33,7 @@ Batch (all escenarios/capturas found on disk):
       --output-dir  results/filtered \\
       --batch
 
-Run from: /home/lronquilloext/Documents/Logicarc/datageneration/
+Run from: repo root (datageneration/)
 """
 
 from __future__ import annotations

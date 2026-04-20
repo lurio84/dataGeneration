@@ -250,21 +250,3 @@ def load_carretilla(stl_path: str) -> o3d.geometry.TriangleMesh:
     z_translate = -(z_max - FORKLIFT_FORK_L)
     fk.translate([-x_center, -y_min, z_translate])
     return fk
-
-
-def load_forklift(stl_path: str) -> o3d.geometry.TriangleMesh:
-    """
-    Load forklift STL (in mm) and convert to metres.
-    STL Z=0 is the cab rear, Z=1.962 are the forks.
-    We translate so forks sit just behind the pallet back edge (world Z≈-0.85m)
-    and the cab is further back (world Z≈-2.8m).  No overlap with cargo.
-    """
-    fk = o3d.io.read_triangle_mesh(stl_path)
-    fk.scale(0.001, center=(0.0, 0.0, 0.0))    # mm → m
-    fk.compute_vertex_normals()
-    verts = np.asarray(fk.vertices)
-    y_min = verts[:, 1].min()
-    # Sit on floor (Y) and push back so forks (Z=1.962) end up at world Z≈-0.85
-    # → Z_translate = -0.85 - 1.962 = -2.812 ≈ -2.8
-    fk.translate([0.0, -y_min, -2.8])
-    return fk

@@ -35,14 +35,17 @@ datageneration/
 │   └── test_pipeline.py           ← pytest test suite (101 tests)
 ├── data/
 │   ├── carretilla.stl             ← forklift STL used by --p-forklift
-│   ├── forklift.stl               ← legacy forklift mesh (kept for reference)
 │   └── person.stl                 ← person scan (optional; fallback: cylinder+sphere)
+├── yolov8n.pt                     ← YOLOv8 weights for filter_person_yolo.py (not tracked in git)
 ├── docs/
 │   └── ADDING_ASSETS.md           ← step-by-step guide for adding new STL assets
 ├── output/
 │   ├── dataset/                   ← generated PLY files + metadata.json
 │   ├── previews/                  ← PNG previews
 │   └── analysis/                  ← comparison figures vs real data
+├── scripts/
+│   ├── *.py                       ← pipeline and analysis scripts (see ## Scripts below)
+│   └── archive/                   ← retired debug scripts (not part of active pipeline)
 ├── DECISIONS.md                   ← design decisions log
 └── requirements.txt
 ```
@@ -81,7 +84,7 @@ python3 generate_dataset.py --n 100 --p-multi-cargo 0.7
 python3 generate_dataset.py --n 100 --p-flat-cargo 0.3
 
 # Adjust sensor noise (defaults calibrated to real FUSION3D)
-python3 generate_dataset.py --noise 0.030 --dropout 0.15 --voxel 0.019
+python3 generate_dataset.py --noise-core-ref 0.010 --noise-tail-ref 0.025 --dropout 0.15 --voxel 0.019
 
 # Carretilla elevadora in every scene (requires data/carretilla.stl)
 python3 generate_dataset.py --n 100 --p-forklift 1.0
@@ -97,18 +100,19 @@ python3 generate_dataset.py --n 200 --p-forklift 0.5
 | `--n` | 100 | Number of scenes |
 | `--seed` | 42 | Random seed |
 | `--out` | `../output/dataset` | Output directory |
-| `--noise` | 0.030 | Gaussian noise σ (metres) |
+| `--noise-core-ref` | 0.010 | σ_core @ z_ref=3m for Gaussian mixture component (m) |
+| `--noise-tail-ref` | 0.025 | σ_tail @ z_ref=3m for t-Student component (m) |
 | `--dropout` | 0.15 | Fraction of points randomly removed |
 | `--voxel` | 0.019 | Voxel grid size (metres) |
 | `--outliers` | 0.03 | Fraction turned into local outlier clusters |
-| `--p-pallet` | 1.0 | Probability of EUR pallet base (1.2 × 0.8 m) |
-| `--p-cylinder` | 0.0 | Probability of cylinder instead of box as primary cargo |
-| `--p-multi-cargo` | 0.0 | Probability of a second cargo item (stacked or tandem) |
-| `--p-flat-cargo` | 0.0 | Probability of very low/flat cargo (near-floor hard case) |
+| `--p-pallet` | 0.80 | Probability of EUR pallet base (1.2 × 0.8 m) |
+| `--p-cylinder` | 0.15 | Probability of cylinder instead of box as primary cargo |
+| `--p-multi-cargo` | 0.25 | Probability of a second cargo item (stacked or tandem) |
+| `--p-flat-cargo` | 0.10 | Probability of very low/flat cargo (near-floor hard case) |
 | `--flat-min-h` | 0.03 | Min height in flat-cargo mode (m) |
 | `--flat-max-h` | 0.15 | Max height in flat-cargo mode (m) |
-| `--p-person` | 0.0 | Probability of person in scene |
-| `--p-forklift` | 0.0 | Probability of carretilla elevadora instead of pallet jack |
+| `--p-person` | 0.30 | Probability of person in scene |
+| `--p-forklift` | 0.00 | Probability of carretilla elevadora instead of pallet jack |
 | `--forklift-stl` | `../data/carretilla.stl` | Path to forklift STL (relative to `src/`) |
 | `--box-min-w` | 0.30 | Min cargo box X width (m) |
 | `--box-max-w` | 1.00 | Max cargo box X width (m) |
@@ -253,6 +257,30 @@ python3 classifier/evaluate.py \
 
 Saves normalised confusion matrices, F1 per class, feature importance plot, and RF vs LightGBM comparison.
 
+## Scripts
+
+All scripts run from the repo root (`datageneration/`), not from `src/`.
+
+| Script | Purpose |
+|--------|---------|
+| `run_geometric.py` | **Main pipeline** — runs the geometric cargo extraction pipeline (stages 0–3) on a real PLY |
+| `filter_person_yolo.py` | **Main pipeline** — filters person clusters from real captures using YOLOv8 2D detection |
+| `eval_real_20esc.py` | Evaluates the geometric pipeline against Paula's reference volumes for all 20 scenarios |
+| `eval_volume.py` | Volume estimation analysis |
+| `plot_eval_20esc.py` | Generates plots from `eval_real_20esc.py` output |
+| `train_person_raw.py` | Trains the raw person point-cloud classifier |
+| `train_cluster_classifier.py` | Trains the cluster-level ML classifier |
+| `export_visual_plys.py` | Exports coloured PLYs for visual inspection |
+| `render_bbb_verify.py` | Renders BBB captures for verification |
+| `render_bbb_diff.py` | Diff rendering between two BBB runs |
+| `validate_synthetic.py` | Validates synthetic dataset statistics |
+| `analyze_predictions.py` | Analyses per-scene prediction outputs |
+| `binary_metrics.py` | Computes binary classification metrics |
+| `bench_training.py` | Benchmarks training speed |
+| `test_person_2d.py` | Exploratory tests for 2D person detection |
+| `test_person_heuristic.py` | Exploratory tests for heuristic person detection |
+| `scripts/archive/` | Retired debug/diagnostic scripts (not part of active pipeline) |
+
 ## Coordinate system
 
 | Axis | Direction |
@@ -267,11 +295,19 @@ Units: **metres**
 
 ## Sensor noise (calibrated to real FUSION3D)
 
-| Parameter | Value | Calibration result |
+Non-Gaussian mixture model with quadratic depth scaling and axial ray projection (implemented in `sensor/noise.py`).
+
+| Parameter | Value | Notes |
 |---|---|---|
-| Gaussian noise σ | 30 mm | Floor roughness: synth 24.8 mm vs real 29.8 mm ✅ |
-| Voxel grid | 19 mm | NN spacing: synth 47.5 mm vs real 51.3 mm ✅ |
+| `noise_core_ref` | 10 mm | σ_core (Gaussian) @ z_ref=3 m |
+| `noise_tail_ref` | 25 mm | σ_tail (t-Student df=4) @ z_ref=3 m |
+| `noise_gaussian_frac` | 0.60 | Fraction of points using Gaussian core |
+| Depth scaling | quadratic | σ(Z) = σ_ref · (Z/3)² |
+| Voxel grid | 19 mm | Calibrated to real NN spacing |
 | Dropout | 15% | — |
 | Outlier ratio | 3% | — |
-| Floor extent X | ±2.5 m | Footprint: synth 5.29 m vs real 5.00 m ✅ |
-| Floor extent Z | ±2.0 m | Footprint: synth 4.23 m vs real 3.97 m ✅ |
+| Floor extent X | ±2.5 m | Footprint: synth 5.29 m vs real 5.00 m |
+| Floor extent Z | ±2.0 m | Footprint: synth 4.23 m vs real 3.97 m |
+
+Empirical targets (FUSION3D BBB, measured 2026-04-20): cenital 3.5 m → σ_axial≈16 mm; der 4.3 m tilt 42° → σ_axial≈27 mm; izq 4.6 m tilt 42° → σ_axial≈41 mm.
+Re-run `analyze.py` after regenerating dataset to verify NN density ratio vs real captures.

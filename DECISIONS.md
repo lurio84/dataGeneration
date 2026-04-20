@@ -2,6 +2,30 @@
 
 Documento vivo. Se actualiza a medida que se toman decisiones.
 
+## Índice
+
+| § | Tema | Estado |
+|---|------|--------|
+| [1](#1-cómo-va-a-ser-el-formato-de-etiqueta) | Formato de etiqueta (PLY, clases, RGB) | ✅ |
+| [2](#2-generar-dataset-etiquetado-inicial-caso-simple) | Dataset inicial — configuración validada | ✅ |
+| [3](#3-qué-otros-primitivos-de-open3d-tienen-sentido) | Primitivos: cilindro implementado, L-shape aplazado | 🟡 |
+| [4](#4-queremos-simular-suelo) | Suelo sintético | ✅ |
+| [5](#5-función-para-combinar-primitivos-en-casos-complejos) | Multi-cargo (stacked/tandem), cargo-on-vehicle | ✅ |
+| [6](#6-búsqueda-de-recursos-mesh-3d-stl--obj) | Assets 3D (STL) | ✅ |
+| [7](#7-calibración-de-ruido-vs-sensor-real) | Calibración de ruido vs FUSION3D real | ✅ |
+| [8](#8-generar-dataset-final) | Dataset final — resultados y métricas | ✅ |
+| [9](#9-interfaz-streamlit-apppy) | Streamlit UI | ✅ |
+| [10](#10-primitivo-persona-p_person) | Persona en escena | ✅ |
+| [11](#11-clasificador-ml-por-punto--5-clases-11) | Clasificador ML 5 clases — features, CV, resultados | 🟡 |
+| [12](#12-experimento-no-floor--entrenamiento-sin-clase-suelo) | Experimento sin suelo (descartado) | ❌ |
+| [13](#13-bench-floor-síno--decisión-final-2026-04-13) | Bench floor sí/no — decisión final | ✅ |
+| [14](#14-limpieza-dataset-v1-2026-04-13) | Limpieza dataset v1 | ✅ |
+| [15](#15-diagnóstico-lgbm-v1-sobre-bbb-real--3-hallazgos-2026-04-14) | Diagnóstico LGBM sobre BBB real (density shift, leakage) | ✅ |
+| [16](#16--segmentación-de-persona-en-datos-reales-2026-04-16) | Segmentación persona — YOLO 2D funciona | ✅ |
+| [17](#17--pipeline-extracción-de-carga-real-end-to-end-2026-04-17) | Pipeline end-to-end extracción de carga real | 🟡 |
+| [18](#18-añadir-carretilla-elevadora-stl-como-vehículo-alternativo) | Carretilla elevadora como vehículo alternativo | ✅ |
+| [Pendiente](#pendiente) | Trabajo pendiente activo | — |
+
 ---
 
 ## 1. ¿Cómo va a ser el formato de etiqueta?
@@ -750,9 +774,9 @@ Razón: el STL no tiene metadata sobre dónde están exactamente las horquillas 
 
 **Si el STL cambia**, actualizar las constantes en `geometry/meshes.py` y re-verificar visualmente.
 
-### Decisión: `data/forklift.stl` legacy se conserva
+### Decisión: `data/forklift.stl` legacy eliminado
 
-El STL legacy (915 KB) permanece en el repo sin ser el default. Razones: conservar la historia del proyecto; `load_forklift()` permanece como referencia para futuros loaders; no hay coste real de conservarlo.
+El STL legacy (915 KB) fue eliminado en limpieza 2026-04-20. `load_forklift()` también eliminada de `geometry/meshes.py` — la carretilla activa es `load_carretilla()` vía `data/carretilla.stl`.
 
 ### Lógica de `cargo_on_vehicle`
 
