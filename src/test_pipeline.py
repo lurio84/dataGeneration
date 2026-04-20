@@ -39,6 +39,8 @@ from generate_dataset import (
 )
 from sensor.noise import compute_axial_noise
 from geometry.meshes import JACK_FORK_H, JACK_FORK_L
+from cargo_geometric.floor import remove_floor, synthetic_floor
+from cargo_geometric.params import GeometricParams
 from utils.preview_grid import render_scene, load_synth
 
 
@@ -1413,6 +1415,132 @@ class TestNoiseMixture(unittest.TestCase):
                            f"Scaling demasiado bajo: ratio={ratio:.2f}, esperado≈{expected:.2f}")
         self.assertLess(ratio, expected * 1.30,
                         f"Scaling demasiado alto: ratio={ratio:.2f}, esperado≈{expected:.2f}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 17. remove_floor() — RANSAC floor removal
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestFloorRemoval(unittest.TestCase):
+
+    def _floor_pts(self, rng, n=2000, y_noise=0.01):
+        """Random points on a noisy horizontal plane at Y=0."""
+        return np.column_stack([
+            rng.uniform(-2, 2, n),
+            rng.normal(0, y_noise, n),
+            rng.uniform(-2, 2, n),
+        ]).astype(np.float32)
+
+    def test_valid_floor_detected(self):
+        """Clear horizontal floor at Y=0 is found and removed."""
+        rng = np.random.default_rng(42)
+        floor_pts = self._floor_pts(rng, n=2000)
+        cargo_pts = np.column_stack([
+            rng.uniform(-0.3, 0.3, 200),
+            np.full(200, 0.5) + rng.normal(0, 0.01, 200),
+            rng.uniform(-0.2, 0.2, 200),
+        ]).astype(np.float32)
+        pts = np.vstack([floor_pts, cargo_pts])
+        result = remove_floor(pts, GeometricParams())
+        self.assertAlmostEqual(result.floor_y, 0.0, delta=0.05,
+                               msg="Floor must be detected near Y=0")
+        self.assertGreater(len(result.pts), 0,
+                           msg="Cargo points must survive floor removal")
+        self.assertGreater(result.floor_mask.sum(), len(result.pts),
+                           msg="More floor points removed than cargo remaining")
+
+    def test_no_horizontal_plane_raises(self):
+        """Vertical wall (no floor plane) must raise RuntimeError."""
+        rng = np.random.default_rng(42)
+        pts = np.column_stack([
+            np.zeros(1000),           # X=0 constant → vertical plane
+            rng.uniform(0, 2, 1000),  # Y varies
+            rng.uniform(-1, 1, 1000), # Z varies
+        ]).astype(np.float32)
+        with self.assertRaises(RuntimeError):
+            remove_floor(pts, GeometricParams())
+
+    def test_cargo_top_rejected_floor_selected(self):
+        """Large cargo top at Y=0.5 triggers floor_below_max_frac, true floor selected."""
+        rng = np.random.default_rng(99)
+        # Large flat surface at Y=0.5 (cargo top) — may fool RANSAC first
+        cargo_top = np.column_stack([
+            rng.uniform(-0.4, 0.4, 2000),
+            np.full(2000, 0.5) + rng.normal(0, 0.005, 2000),
+            rng.uniform(-0.3, 0.3, 2000),
+        ]).astype(np.float32)
+        # Smaller floor at Y=0 below cargo
+        floor_pts = self._floor_pts(rng, n=600)
+        pts = np.vstack([cargo_top, floor_pts])
+        result = remove_floor(pts, GeometricParams(floor_max_attempts=3))
+        self.assertAlmostEqual(result.floor_y, 0.0, delta=0.10,
+                               msg="Must select real floor at Y=0, not cargo top at Y=0.5")
+
+    def test_synthetic_floor_passes_all_points(self):
+        """synthetic_floor() creates virtual floor without removing any points."""
+        rng = np.random.default_rng(0)
+        pts = np.column_stack([
+            rng.uniform(-1, 1, 400),
+            rng.uniform(0.1, 1.0, 400),  # no floor points present
+            rng.uniform(-1, 1, 400),
+        ]).astype(np.float32)
+        result = synthetic_floor(pts, GeometricParams())
+        self.assertEqual(len(result.pts), len(pts),
+                         msg="synthetic_floor must not remove any points")
+        self.assertFalse(result.floor_mask.any(),
+                         msg="floor_mask must be all-False for synthetic_floor")
+        self.assertLess(result.floor_y, float(pts[:, 1].min()),
+                        msg="Virtual floor_y must be below all point heights")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 18. Label count correctness (person=3, pallet=4)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestLabelCounts(unittest.TestCase):
+
+    def test_person_label_present_when_enabled(self):
+        """p_person=1.0 → al menos una escena tiene puntos con label=3."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _minimal_cfg(tmp, n_samples=10, p_person=1.0, seed=123)
+            run_generation(cfg)
+            all_labels: set = set()
+            for ply in Path(tmp).glob("*.ply"):
+                all_labels.update(_read_ply_labels(ply).tolist())
+            self.assertIn(LABEL["person"], all_labels,
+                          "p_person=1.0 pero ninguna escena tiene label=3 (person)")
+
+    def test_pallet_label_present_when_enabled(self):
+        """p_pallet=1.0 → todas las escenas tienen puntos con label=4."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _minimal_cfg(tmp, n_samples=5, p_pallet=1.0, seed=456)
+            run_generation(cfg)
+            for ply in sorted(Path(tmp).glob("*.ply")):
+                lbs = _read_ply_labels(ply)
+                self.assertIn(LABEL["pallet"], set(lbs.tolist()),
+                              f"{ply.name}: p_pallet=1.0 pero no hay label=4 (pallet)")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 19. Tandem gap boundary condition
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestTandemGapBoundary(unittest.TestCase):
+
+    def test_tandem_at_minimum_gap_produces_two_items(self):
+        """d1 + 0.02 + d2 = EUR_D exacto → tandem válido, 2 items, gap ≥ 0.02m."""
+        d1 = 0.40
+        d2 = EUR_D - d1 - 0.02   # = 0.38, fills the pallet depth exactly
+        s1 = {"type": "box", "w": 0.5, "h": 0.6, "d": d1}
+        s2 = {"type": "box", "w": 0.4, "h": 0.5, "d": d2}
+        items, _ = compose_cargo([s1, s2], "tandem", 0.0, np.random.default_rng(0))
+        self.assertEqual(len(items), 2,
+                         "Tandem con d2 mínimo debe generar exactamente 2 items")
+        _, p1 = items[0]
+        _, p2 = items[1]
+        face_gap = (p2["oz"] - p1["oz"]) - (s1["d"] + s2["d"]) / 2
+        self.assertGreaterEqual(face_gap, 0.02 - 1e-5,
+                                f"Gap entre items = {face_gap:.4f} < 0.02m mínimo")
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
