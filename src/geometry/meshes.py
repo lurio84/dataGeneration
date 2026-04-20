@@ -103,6 +103,9 @@ def make_primitive_mesh(spec: dict) -> o3d.geometry.TriangleMesh:
     raise ValueError(f"Unknown primitive type: {t!r}")
 
 
+_PERSON_STL_CACHE: "dict[str, o3d.geometry.TriangleMesh]" = {}
+
+
 def make_person_mesh(
     height: float = 1.75,
     y_rotation_deg: float = 0.0,
@@ -123,10 +126,14 @@ def make_person_mesh(
     _stl = Path(stl_path) if stl_path is not None else Path(__file__).parent.parent.parent / "data" / "person.stl"
 
     if _stl.exists():
-        mesh = o3d.io.read_triangle_mesh(str(_stl))
-        if len(mesh.vertices) == 0:
-            raise RuntimeError(f"person.stl cargado vacío: {_stl}")
-        mesh.compute_vertex_normals()
+        cache_key = str(_stl)
+        if cache_key not in _PERSON_STL_CACHE:
+            base = o3d.io.read_triangle_mesh(cache_key)
+            if len(base.vertices) == 0:
+                raise RuntimeError(f"person.stl cargado vacío: {_stl}")
+            base.compute_vertex_normals()
+            _PERSON_STL_CACHE[cache_key] = base
+        mesh = o3d.geometry.TriangleMesh(_PERSON_STL_CACHE[cache_key])
         # Escalar a altura objetivo (invariante a las unidades del STL)
         verts = np.asarray(mesh.vertices)
         current_h = verts[:, 1].max() - verts[:, 1].min()
