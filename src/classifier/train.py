@@ -536,11 +536,17 @@ def main():
             print(f"  --class-weight-mult: {cls_name} ×{mult}", flush=True)
 
     # ── Model factories ──────────────────────────────────────────────────────
+    # When sample_weight is provided (cw_mult active), it already encodes balanced
+    # weighting via compute_sample_weight("balanced"). Using class_weight="balanced"
+    # on top would apply balanced weighting twice, quadratically over-weighting
+    # minority classes. Set class_weight=None so only sample_weight drives balance.
+    cw_model = None if cw_mult else "balanced"
+
     def make_rf_cv():
         return RandomForestClassifier(
             n_estimators=args.cv_estimators,
             max_depth=20,
-            class_weight="balanced",
+            class_weight=cw_model,
             n_jobs=args.n_jobs,
             random_state=args.seed,
         )
@@ -549,7 +555,7 @@ def main():
         return RandomForestClassifier(
             n_estimators=args.n_estimators,
             max_depth=20,
-            class_weight="balanced",
+            class_weight=cw_model,
             max_samples=args.max_samples_rf,
             n_jobs=args.n_jobs,
             random_state=args.seed,
@@ -559,7 +565,7 @@ def main():
         import lightgbm as lgb
         return lgb.LGBMClassifier(
             num_leaves=63,
-            class_weight="balanced",
+            class_weight=cw_model,
             n_jobs=args.n_jobs,
             random_state=args.seed,
             verbose=-1,

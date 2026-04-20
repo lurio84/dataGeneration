@@ -46,17 +46,24 @@ CFG = {
     "noise_z_ref":         3.0,    # m  reference depth for quadratic scaling
     "dropout_ratio":    0.15,    # fraction of points removed
     "outlier_ratio":    0.03,    # fraction turned into local outliers
-    "voxel_size":       0.019,   # m  voxel grid; calibrated to real NN spacing ~55mm (was 10mm)
+    "voxel_size":       0.019,   # m  voxel grid; calibrated to real ROI NN spacing ~19.5mm
     "local_outlier_std": 0.055,  # m  spread of local outlier clusters
 
-    # ── Camera positions (matching BBB system: cenital + der + izq) ──
-    # Each camera sits above the scene looking toward origin.
-    # pos: (X, Y, Z) in metres.  fov_deg: half-cone field of view.
+    # ── Camera positions (BBB real heights: cenital 3.68m, der/izq 3.80m) ──
+    # All cameras placed on the arch plane at Z=0 so the view cone reaches both
+    # the cargo/pallet (Z>0) and the forklift mast (Z≈-0.9m behind fork root).
+    # Cenital: looks straight down (pitch=90°). fov_deg=90° covers ±2.5m floor
+    #   and sees the mast top at (Y=2.78, Z≈-0.87).
+    # Der/Izq: X=3.33m gives 48.8° tilt from horizontal (≈BBB 47.5°).
+    #   fov_deg=70° widens cone to include mast top and far floor corners.
     "cameras": [
-        {"name": "cenital", "pos": [ 0.0, 1.9,  0.4], "fov_deg": 75.0},
-        {"name": "der",     "pos": [ 2.0, 1.3,  1.8], "fov_deg": 65.0},
-        {"name": "izq",     "pos": [-2.0, 1.3,  1.8], "fov_deg": 65.0},
+        {"name": "cenital", "pos": [ 0.0,  3.68, 0.0], "fov_deg": 90.0},
+        {"name": "der",     "pos": [ 3.33, 3.80, 0.0], "fov_deg": 70.0},
+        {"name": "izq",     "pos": [-3.33, 3.80, 0.0], "fov_deg": 70.0},
     ],
+    # ref_dist for apply_distance_density: at this distance, full density is kept.
+    # Calibrated to mean camera-to-cargo distance (~3.0m) at real BBB heights.
+    "density_ref_dist": 3.0,
 
     # ── Scene composition ──
     "p_multi_cargo": 0.25,  # prob. of secondary cargo (stacked/tandem)
@@ -64,7 +71,7 @@ CFG = {
     "flat_min_h":    0.03,  # m  min height in flat-cargo mode (overrides box_min_h / cyl_min_h)
     "flat_max_h":    0.15,  # m  max height in flat-cargo mode
     "p_person":     0.30,   # 30% de escenas tienen persona
-    "p_forklift":   0.00,   # prob carretilla instead of pallet jack (0=always jack)
+    "p_forklift":   0.50,   # prob carretilla instead of pallet jack (0=always jack)
     "p_pallet":     0.80,   # EUR pallet present under cargo (20% sin pallet)
     "p_cargo_on_vehicle": 0.50,  # cuando no hay pallet: prob. de cargo sobre horcas
     "enable_floor": True,   # include floor plane points
@@ -292,25 +299,24 @@ def generate_scene(
     obj_pts.append(vp); obj_lbs.append(vl)
     meta["objects"].append({"vehicle": {"type": v_type, "front_z": round(vehicle_front_z, 3)}})
 
-    # ── Extra floor under forklift body (extends beyond standard floor_extent_z) ──
-    # The forklift cab reaches vehicle_front_z - v_body_d ≈ -3.4 m, beyond the
-    # default floor_extent_z = 2.0 m. Add a floor patch to fill this gap.
-    if is_forklift and cfg.get("enable_floor", True):
-        body_z_min = vehicle_front_z - v_body_d   # rear of cab in world Z
-        std_floor_z = -cfg["floor_extent_z"]       # existing floor boundary
-        if body_z_min < std_floor_z:
-            extra_len  = std_floor_z - body_z_min + 0.3   # +0.3 m margin
-            extra_width = cfg["floor_extent_x"] * 2       # same full width as main floor
+    # ── Extra floor: extend Z to cover full vehicle body + operator margin ──
+    # Person operator zone can reach vehicle_zmin − 0.70 m.
+    # Use 1.5 m safety margin beyond vehicle rear to guarantee floor coverage.
+    if cfg.get("enable_floor", True):
+        vehicle_zmin = vehicle_front_z - v_body_d
+        needed_z_min = vehicle_zmin - 1.5          # 1.5 m behind vehicle rear
+        std_floor_z  = -cfg["floor_extent_z"]
+        if needed_z_min < std_floor_z:
+            extra_len   = std_floor_z - needed_z_min
+            extra_width = cfg["floor_extent_x"] * 2
             n_extra = int(cfg["pts_floor"] * (extra_len * extra_width)
                           / (cfg["floor_extent_x"] * 2 * cfg["floor_extent_z"] * 2))
             n_extra = max(n_extra, 5_000)
             ex = rng.uniform(-extra_width / 2, extra_width / 2, n_extra).astype(np.float32)
-            ez = rng.uniform(body_z_min - 0.3, std_floor_z, n_extra).astype(np.float32)
+            ez = rng.uniform(needed_z_min, std_floor_z, n_extra).astype(np.float32)
             ey = np.zeros(n_extra, dtype=np.float32)
-            extra_floor_pts = np.stack([ex, ey, ez], axis=1)
-            extra_floor_lbs = np.zeros(n_extra, dtype=np.uint8)
-            floor_pts = np.vstack([floor_pts, extra_floor_pts])
-            floor_lbs = np.concatenate([floor_lbs, extra_floor_lbs])
+            floor_pts = np.vstack([floor_pts, np.stack([ex, ey, ez], axis=1).astype(np.float32)])
+            floor_lbs = np.concatenate([floor_lbs, np.zeros(n_extra, dtype=np.uint8)])
 
     # ── Persona (opcional) ──
     # Zona operario: detrás del cuerpo del vehículo.
@@ -365,17 +371,26 @@ def generate_scene(
                 "stl":     "person.stl" if _person_stl.exists() else "fallback",
             }})
 
-    # ── Apply camera FOV filter to objects only ──
+    # ── Apply camera FOV filter to non-vehicle objects ──
+    # Vehicle (label 2) is never filtered: full STL geometry always retained.
+    # Floor, pallet, cargo, person are filtered to realistic camera coverage.
     obj_all = np.vstack(obj_pts)
     lbs_all_obj = np.concatenate(obj_lbs)
-    obj_all, lbs_all_obj = camera_arc_filter(obj_all, lbs_all_obj, cfg["cameras"])
+    if not cfg.get("skip_camera_filter", False):
+        is_veh = lbs_all_obj == LABEL["vehicle"]
+        filtered_pts, filtered_lbs = camera_arc_filter(
+            obj_all[~is_veh], lbs_all_obj[~is_veh], cfg["cameras"]
+        )
+        obj_all    = np.vstack([filtered_pts, obj_all[is_veh]])
+        lbs_all_obj = np.concatenate([filtered_lbs, lbs_all_obj[is_veh]])
 
     # ── Merge floor (unfiltered) + objects (filtered) ──
     pts_all = np.vstack([floor_pts, obj_all])
     lbs_all = np.concatenate([floor_lbs, lbs_all_obj])
 
     # ── Distance-dependent density falloff ──
-    pts_all, lbs_all = apply_distance_density(pts_all, lbs_all, cfg["cameras"], rng)
+    pts_all, lbs_all = apply_distance_density(pts_all, lbs_all, cfg["cameras"], rng,
+                                                ref_dist=cfg.get("density_ref_dist", 3.0))
 
     # ── Apply sensor degradation ──
     pts_all, lbs_all = degrade_labeled(pts_all, lbs_all, cfg, rng)
@@ -447,6 +462,34 @@ def parse_args(cfg: dict) -> dict:
     p.add_argument("--floor-ext-z", type=float, default=cfg["floor_extent_z"], metavar="M", help="Floor half-extent Z (default: %(default)s)")
 
     args = p.parse_args()
+
+    # ── Validation ──
+    prob_args = {
+        "--p-multi-cargo": args.p_multi_cargo,
+        "--p-flat-cargo":  args.p_flat_cargo,
+        "--p-person":      args.p_person,
+        "--p-forklift":    args.p_forklift,
+        "--p-pallet":      args.p_pallet,
+        "--p-cylinder":    args.p_cylinder,
+        "--dropout":       args.dropout,
+        "--outliers":      args.outliers,
+    }
+    for name, val in prob_args.items():
+        if not (0.0 <= val <= 1.0):
+            p.error(f"{name} must be in [0, 1], got {val}")
+
+    minmax_pairs = [
+        ("--box-min-w", args.box_min_w, "--box-max-w", args.box_max_w),
+        ("--box-min-d", args.box_min_d, "--box-max-d", args.box_max_d),
+        ("--box-min-h", args.box_min_h, "--box-max-h", args.box_max_h),
+        ("--cyl-min-r", args.cyl_min_r, "--cyl-max-r", args.cyl_max_r),
+        ("--cyl-min-h", args.cyl_min_h, "--cyl-max-h", args.cyl_max_h),
+        ("--flat-min-h", args.flat_min_h, "--flat-max-h", args.flat_max_h),
+    ]
+    for lo_name, lo_val, hi_name, hi_val in minmax_pairs:
+        if lo_val > hi_val:
+            p.error(f"{lo_name} ({lo_val}) must be ≤ {hi_name} ({hi_val})")
+
     cfg = cfg.copy()
     cfg["n_samples"]      = args.n
     cfg["seed"]           = args.seed
@@ -505,7 +548,13 @@ def run_generation(
                 f"p_forklift={cfg['p_forklift']} but carretilla STL not found: {stl_path}"
             )
 
-    Path(cfg["output_dir"]).mkdir(parents=True, exist_ok=True)
+    out_dir = Path(cfg["output_dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for old in out_dir.glob("*.ply"):
+        old.unlink()
+    meta_old = out_dir / "metadata.json"
+    if meta_old.exists():
+        meta_old.unlink()
 
     all_meta: list[dict] = []
     n = cfg["n_samples"]
@@ -515,7 +564,7 @@ def run_generation(
         if progress_cb is not None:
             progress_cb(i + 1, n)
 
-    meta_path = Path(cfg["output_dir"]) / "metadata.json"
+    meta_path = out_dir / "metadata.json"
     with open(meta_path, "w") as f:
         json.dump(all_meta, f, indent=2)
     return all_meta
@@ -537,7 +586,7 @@ def main() -> None:
         if _stl_p.exists():
             log.info("Carretilla STL: %s  (p_forklift=%.2f)", _stl_p, cfg.get("p_forklift", 0.0))
         elif cfg.get("p_forklift", 0.0) > 0.0:
-            log.error("STL no encontrado: %s — se usará traspaleta", _stl_p)
+            log.error("STL no encontrado: %s — abortando (p_forklift=%.2f > 0)", _stl_p, cfg["p_forklift"])
         else:
             log.info("STL no encontrado (%s); p_forklift=0 → siempre traspaleta", _stl_p)
 

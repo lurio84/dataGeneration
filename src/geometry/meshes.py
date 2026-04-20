@@ -27,7 +27,7 @@ JACK_X_HALF:  float = 0.35   # half-width of full vehicle bounding box
 #     Y: [0, 2.785]        (height; Y_min=0 already sits on floor)
 #     Z: [−2.97, +1.10]    (body in −Z, forks in +Z)
 # FORKLIFT_FORK_L / FORKLIFT_FORK_H are physical estimates — verify visually.
-FORKLIFT_FORK_H:  float = 0.25   # approx fork platform height when forks lowered (m)
+FORKLIFT_FORK_H:  float = 0.226  # fork top surface height measured from carretilla.stl (Y p99=0.226m)
 FORKLIFT_FORK_L:  float = 1.10   # estimated fork length in +Z direction (m)
 FORKLIFT_BODY_D:  float = 2.97   # body depth in −Z: total_len(4.07) − FORK_L(1.10)
 FORKLIFT_X_HALF:  float = 0.635  # half-width (STL X extent 1.270 m, centred at 0)

@@ -12,10 +12,40 @@ def sample_labeled(
     mesh: o3d.geometry.TriangleMesh,
     label: int,
     n_points: int,
+    cameras: "list[dict] | None" = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Uniformly sample mesh surface → (pts [N,3], labels [N,])."""
-    pcd = mesh.sample_points_uniformly(number_of_points=n_points)
-    pts = np.asarray(pcd.points, dtype=np.float32)
+    """Uniformly sample mesh surface → (pts [N,3], labels [N,]).
+
+    When cameras is provided, only camera-facing triangles are sampled (backface
+    culling). Contact surfaces (box bottom, pallet underside, fork underside) are
+    never sampled, so sensor noise cannot push their points through adjacent objects.
+    """
+    if cameras:
+        mesh.compute_triangle_normals()
+        oversample = max(int(n_points * 3), n_points + 2_000)
+        pcd = mesh.sample_points_uniformly(number_of_points=oversample,
+                                           use_triangle_normal=True)
+        pts = np.asarray(pcd.points, dtype=np.float32)
+        nrm = np.asarray(pcd.normals, dtype=np.float64)
+
+        # Keep points whose triangle normal faces at least one camera.
+        cam_positions = [np.array(c["pos"], dtype=np.float64) for c in cameras]
+        visible = np.zeros(len(pts), dtype=bool)
+        for cp in cam_positions:
+            to_cam = cp - pts.astype(np.float64)        # (N,3), unnormalised
+            visible |= np.einsum("ij,ij->i", nrm, to_cam) > 0
+
+        pts = pts[visible]
+        if len(pts) == 0:
+            # Degenerate mesh or all normals zero — fall back to full sampling.
+            pcd = mesh.sample_points_uniformly(number_of_points=n_points)
+            pts = np.asarray(pcd.points, dtype=np.float32)
+        elif len(pts) > n_points:
+            pts = pts[:n_points]
+    else:
+        pcd = mesh.sample_points_uniformly(number_of_points=n_points)
+        pts = np.asarray(pcd.points, dtype=np.float32)
+
     lbs = np.full(len(pts), label, dtype=np.uint8)
     return pts, lbs
 

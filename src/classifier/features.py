@@ -1,7 +1,7 @@
 """
 features.py — Per-point feature extraction for the 5-class ML classifier.
 
-16 geometric features per point using a k-NN neighbourhood (cKDTree + PCA).
+19 geometric features per point using a k-NN neighbourhood (cKDTree + PCA).
 All features are float32.
 
 Positional features dist_xz and dist_centroid_xz have been intentionally
@@ -45,7 +45,7 @@ FEATURE_NAMES: list[str] = [
     "verticality_large",        # 18 |normal_y|    at k=50 — macro-scale vertical alignment
 ]
 
-_N_FEATURES = len(FEATURE_NAMES)   # 16
+_N_FEATURES = len(FEATURE_NAMES)   # 19
 
 # Default neighbourhood parameters — exposed as constants so callers can reference them
 # without hard-coding the numbers (e.g. for documentation or validation).
@@ -132,7 +132,7 @@ def extract_features(
     radius: float = LOCAL_RADIUS_M,
 ) -> np.ndarray:
     """
-    Extract 16 per-point geometric features.
+    Extract 19 per-point geometric features.
 
     Parameters
     ----------
@@ -143,7 +143,7 @@ def extract_features(
 
     Returns
     -------
-    feats : (N, 16) float32 array, columns match FEATURE_NAMES
+    feats : (N, 19) float32 array, columns match FEATURE_NAMES
     """
     pts = np.asarray(pts, dtype=np.float32)
     N = len(pts)
