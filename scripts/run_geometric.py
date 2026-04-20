@@ -38,7 +38,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from cargo_geometric.params import GeometricParams                      # noqa: E402
-from cargo_geometric.floor import preprocess, remove_floor, synthetic_floor  # noqa: E402
+from cargo_geometric.floor import preprocess, remove_floor, synthetic_floor, center_crop_xz  # noqa: E402
 from cargo_geometric.anchor import find_anchor, points_inside_anchor    # noqa: E402
 from cargo_geometric.pallet import detect_pallets                       # noqa: E402
 from cargo_geometric.cargo import extract_cargo                         # noqa: E402
@@ -74,6 +74,24 @@ def _parse_args():
             "Override cargo DBSCAN eps (metres) in --preprocessed mode. "
             "Default: params.preprocessed_dbscan_eps (0.15 m)."
         ),
+    )
+    p.add_argument(
+        "--center-crop", action="store_true",
+        help=(
+            "Enable fixed XZ box crop after floor removal (before anchor). "
+            "Kills returns from walls/shelves far from the pallet area. "
+            "Box defaults set in GeometricParams (BBB-tuned)."
+        ),
+    )
+    p.add_argument(
+        "--center-crop-x", nargs=2, type=float, metavar=("XMIN", "XMAX"),
+        default=None,
+        help="Override center crop X range (metres).",
+    )
+    p.add_argument(
+        "--center-crop-z", nargs=2, type=float, metavar=("ZMIN", "ZMAX"),
+        default=None,
+        help="Override center crop Z range (metres).",
     )
     return p.parse_args()
 
@@ -137,6 +155,28 @@ def main() -> int:
 
     nonfloor_idx = np.where(~floor.floor_mask)[0]
     pts_no_floor = pts[nonfloor_idx]
+
+    # ── Center XZ crop (optional) ─────────────────────────────────────────────
+    # Applied after floor removal so RANSAC keeps the full scene, but before
+    # anchor/pallet/cargo so clustering is not dragged by far-away returns.
+    # Downstream indices remain consistent because we remap nonfloor_idx
+    # through the crop mask; global labels still paint correctly.
+    crop_meta: dict | None = None
+    if args.center_crop:
+        if args.center_crop_x is not None:
+            params.center_crop_x_min, params.center_crop_x_max = args.center_crop_x
+        if args.center_crop_z is not None:
+            params.center_crop_z_min, params.center_crop_z_max = args.center_crop_z
+        _crop_mask = center_crop_xz(pts_no_floor, params)
+        _n_before = int(len(pts_no_floor))
+        pts_no_floor = pts_no_floor[_crop_mask]
+        nonfloor_idx = nonfloor_idx[_crop_mask]
+        crop_meta = {
+            "x_range": [params.center_crop_x_min, params.center_crop_x_max],
+            "z_range": [params.center_crop_z_min, params.center_crop_z_max],
+            "n_before": _n_before,
+            "n_after":  int(len(pts_no_floor)),
+        }
 
     # ── Stage 2a: anchor detection ────────────────────────────────────────────
     t2a = time.perf_counter()
@@ -341,6 +381,7 @@ def main() -> int:
                 "n_clusters_cargo": cargo_res.n_clusters_cargo,
             }
         ),
+        "center_crop":     crop_meta,
         "volume":          volume_result,
         "obb":             obb_result,
         "anchor_volume":   anchor_volume_result,

@@ -61,6 +61,20 @@ def preprocess(ply_path: Path, params: GeometricParams,
     return np.asarray(pcd.points, dtype=np.float32)
 
 
+def center_crop_xz(pts: np.ndarray, params: GeometricParams) -> np.ndarray:
+    """Boolean mask selecting points inside the configured XZ box.
+
+    Applied between floor removal and anchor detection to prune returns from
+    walls/shelves/partial people far from the pallet area.
+    """
+    return (
+        (pts[:, 0] >= params.center_crop_x_min)
+        & (pts[:, 0] <= params.center_crop_x_max)
+        & (pts[:, 2] >= params.center_crop_z_min)
+        & (pts[:, 2] <= params.center_crop_z_max)
+    )
+
+
 def synthetic_floor(pts: np.ndarray, params: GeometricParams) -> FloorResult:
     """Create a FloorResult without RANSAC for clouds with floor pre-removed.
 
@@ -93,6 +107,7 @@ def remove_floor(pts: np.ndarray, params: GeometricParams) -> FloorResult:
     n_total = len(pts)
     work_idx = np.arange(n_total)
     attempts = 0
+    candidates: list[tuple[float, float, np.ndarray, tuple]] = []
 
     while attempts < params.floor_max_attempts and len(work_idx) > params.floor_ransac_n:
         attempts += 1
@@ -111,25 +126,46 @@ def remove_floor(pts: np.ndarray, params: GeometricParams) -> FloorResult:
         vert = abs(float(normal[1]))
 
         if vert >= params.floor_normal_min_y and abs(mean_y) <= params.floor_max_abs_y:
-            mask = np.zeros(n_total, dtype=bool)
-            mask[inlier_global] = True
-            # Second pass: also strip everything inside a Y band around the
-            # accepted plane height. RANSAC distance_threshold (~25 mm) is
-            # narrower than real floor noise (σ≈15 mm), so without this we
-            # leave a thick mat of floor pts that confuses later stages.
-            band = params.floor_band
-            mask |= (pts[:, 1] >= mean_y - band) & (pts[:, 1] <= mean_y + band)
-            return FloorResult(
-                pts=pts[~mask],
-                floor_mask=mask,
-                floor_y=mean_y,
-                plane=(float(a), float(b), float(c), float(d)),
-                attempts=attempts,
-            )
+            below_frac = float(
+                (pts[:, 1] < mean_y - params.floor_below_margin).sum()
+            ) / max(n_total, 1)
+            candidates.append((mean_y, below_frac, inlier_global,
+                               (float(a), float(b), float(c), float(d))))
 
         work_idx = np.setdiff1d(work_idx, inlier_global, assume_unique=True)
 
-    raise RuntimeError(
-        f"remove_floor: no valid plane after {attempts} attempts "
-        f"(thresholds |y|<{params.floor_max_abs_y}, |ny|>{params.floor_normal_min_y})"
+    if not candidates:
+        raise RuntimeError(
+            f"remove_floor: no horizontal plane after {attempts} attempts "
+            f"(thresholds |y|<{params.floor_max_abs_y}, |ny|>{params.floor_normal_min_y})"
+        )
+
+    # Strict candidates (near-zero points below): pick the dominant plane (most
+    # inliers) — the real floor is both strict and dominant. If none are strict
+    # (e.g. misaligned cenital views where cargo top fools RANSAC), fall back to
+    # the candidate with the fewest points below it.
+    strict = [c for c in candidates if c[1] <= params.floor_below_max_frac]
+    if strict:
+        mean_y, _below, inlier_global, plane_abcd = max(
+            strict, key=lambda c: len(c[2])
+        )
+    else:
+        mean_y, _below, inlier_global, plane_abcd = min(
+            candidates, key=lambda c: c[1]
+        )
+
+    mask = np.zeros(n_total, dtype=bool)
+    mask[inlier_global] = True
+    # Second pass: also strip everything inside a Y band around the accepted
+    # plane height. RANSAC distance_threshold (~25 mm) is narrower than real
+    # floor noise (σ≈15 mm), so without this we leave a thick mat of floor
+    # pts that confuses later stages.
+    band = params.floor_band
+    mask |= (pts[:, 1] >= mean_y - band) & (pts[:, 1] <= mean_y + band)
+    return FloorResult(
+        pts=pts[~mask],
+        floor_mask=mask,
+        floor_y=mean_y,
+        plane=plane_abcd,
+        attempts=attempts,
     )

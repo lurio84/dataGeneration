@@ -15,6 +15,13 @@ class GeometricParams:
     floor_max_attempts: int = 3
     floor_band: float = 0.05
 
+    # "Lowest surface" prior: a valid floor has essentially no points below it.
+    # After RANSAC fits a plane at height P, count points with Y < P - margin;
+    # if that fraction exceeds max_frac, the plane is a higher horizontal
+    # surface (e.g. cargo top in cenital views) and we retry.
+    floor_below_margin: float = 0.10
+    floor_below_max_frac: float = 0.02
+
     # Anchor (bulto) detection: 2D XZ DBSCAN of points above floor+anchor_y_min.
     # Real BBB scenes are wide (~5x4m FUSION3D fusions) with much background
     # noise; finding the cargo blob first lets us restrict pallet search to
@@ -65,6 +72,17 @@ class GeometricParams:
     # the values below are the defaults for ~8-10k pt preprocessed clouds.
     preprocessed_dbscan_eps: float = 0.15       # 2× default; bridges edge gaps
     preprocessed_dbscan_min_pts: int = 10       # lower threshold for sparse clouds
+
+    # Center XZ crop (applied after floor removal, before anchor detection).
+    # Rationale: BBB pallet sits at roughly X∈[1.5, 4.2]m, Z∈[-2.5, 0.8]m after
+    # FUSION3D Z→Y alignment. Far-away returns (walls, shelves, partial people
+    # near camera edge) pull anchor DBSCAN off the true cargo in some scenes
+    # (Esc08/09/10/13). A generous fixed box in camera coords preserves all
+    # known successful anchors and kills the rest.
+    center_crop_x_min: float = 0.5
+    center_crop_x_max: float = 5.0
+    center_crop_z_min: float = -3.0
+    center_crop_z_max: float = 2.0
 
     # Confidence-thresholded negative filter (Paso 1.2).
     # A cluster predicted as person/vehicle is only *excluded* when the
