@@ -37,6 +37,7 @@ from generate_dataset import (
     LABEL_RGB,
     EUR_W, EUR_H, EUR_D,
 )
+from sensor.noise import compute_axial_noise
 from geometry.meshes import JACK_FORK_H, JACK_FORK_L
 from utils.preview_grid import render_scene, load_synth
 
@@ -92,7 +93,9 @@ class TestCFG(unittest.TestCase):
     def test_required_keys_present(self):
         required = [
             "n_samples", "seed", "output_dir",
-            "noise_std", "dropout_ratio", "outlier_ratio", "voxel_size",
+            "noise_gaussian_frac", "noise_core_ref", "noise_tail_ref",
+            "noise_tail_df", "noise_z_ref",
+            "dropout_ratio", "outlier_ratio", "voxel_size",
             "p_pallet", "p_multi_cargo", "p_flat_cargo", "flat_min_h", "flat_max_h",
             "p_person", "p_forklift",
             "p_cylinder", "cyl_min_r", "cyl_max_r", "cyl_min_h", "cyl_max_h",
@@ -814,7 +817,8 @@ class TestAppDefaults(unittest.TestCase):
         d = app_module.DEFAULTS
         self.assertEqual(d["n_samples"],  CFG["n_samples"])
         self.assertEqual(d["seed"],       CFG["seed"])
-        self.assertAlmostEqual(d["noise_std"],     CFG["noise_std"])
+        self.assertAlmostEqual(d["noise_core_ref"], CFG["noise_core_ref"])
+        self.assertAlmostEqual(d["noise_tail_ref"], CFG["noise_tail_ref"])
         self.assertAlmostEqual(d["dropout_ratio"], CFG["dropout_ratio"])
         self.assertAlmostEqual(d["voxel_size"],    CFG["voxel_size"])
         self.assertEqual(d["box_w"], (CFG["box_min_w"], CFG["box_max_w"]))
@@ -1329,6 +1333,86 @@ class TestCarretillaForklift(unittest.TestCase):
                                msg="cargo base should be at FORKLIFT_FORK_H")
         self.assertGreaterEqual(placed["oz"], 0.0)
         self.assertLessEqual(placed["oz"], FORKLIFT_FORK_L)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 13. Modelo de ruido físico (mezcla no-Gaussiana, profundidad, rayo)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestNoiseMixture(unittest.TestCase):
+    """Valida el modelo de ruido empírico BBB contra targets calibrados."""
+
+    # Cámara cenital: pos=(0, 1.9, 0.4), mira al origen
+    _CAM_POS = np.array([0.0, 1.9, 0.4])
+
+    def _flat_surface_at_depth(self, depth: float, n: int = 20_000, seed: int = 0):
+        """Superficie plana perpendicular al rayo de la cámara cenital, a `depth` m."""
+        rng = np.random.default_rng(seed)
+        look = -self._CAM_POS / np.linalg.norm(self._CAM_POS)
+        # Dos ejes perpendiculares al rayo
+        u = np.array([1.0, 0.0, 0.0])
+        u = u - (u @ look) * look
+        u /= np.linalg.norm(u)
+        v = np.cross(look, u)
+        center = self._CAM_POS + look * depth
+        su = rng.uniform(-0.5, 0.5, n)
+        sv = rng.uniform(-0.5, 0.5, n)
+        pts = (center + np.outer(su, u) + np.outer(sv, v)).astype(np.float32)
+        return pts, look.astype(np.float64)
+
+    def test_mad_bands_ratio_heavy_tails(self):
+        """Valida colas pesadas con dos criterios:
+        1. MAD crece monotónicamente con la banda (ambas condiciones siempre ciertas).
+        2. Fracción de muestras fuera de ±2.5×σ_IQR >> 1.2% (umbral Gaussiano).
+           Para Gaussiano puro: ~1.2%.  Para nuestra mezcla con t(4): ~10-15%.
+        """
+        pts, look = self._flat_surface_at_depth(3.5)
+        rng = np.random.default_rng(42)
+        noise = compute_axial_noise(pts, CFG["cameras"], CFG, rng)
+        axial = (noise.astype(np.float64) * look).sum(axis=1)  # desplazamiento axial
+
+        def mad_in_band(cutoff):
+            band = axial[np.abs(axial) <= cutoff]
+            return np.median(np.abs(band)) if len(band) > 10 else np.nan
+
+        mad_1p5 = mad_in_band(0.015)
+        mad_3cm = mad_in_band(0.030)
+        mad_5cm = mad_in_band(0.050)
+
+        self.assertFalse(np.isnan(mad_1p5), "No hay puntos en banda ±1.5cm")
+        self.assertFalse(np.isnan(mad_5cm),  "No hay puntos en banda ±5cm")
+        # Criterio 1: MAD crece monotónicamente — prueba distribución no plana/constante
+        self.assertLess(mad_1p5, mad_3cm, "MAD no crece de ±1.5cm a ±3cm")
+        self.assertLess(mad_3cm, mad_5cm, "MAD no crece de ±3cm a ±5cm")
+
+        # Criterio 2: fracción de colas pesadas (fracción de |x| > 2.5×σ_IQR)
+        # σ_IQR es robusto (no inflado por outliers), por eso 2.5×σ_IQR captura bien las colas.
+        # Gaussiano puro: ~1.2%.  Mezcla con t-Student df≤4: ~10-15%.
+        q25, q75 = np.percentile(axial, [25, 75])
+        sigma_iqr = (q75 - q25) / 1.349
+        tail_frac = np.mean(np.abs(axial) > 2.5 * sigma_iqr)
+        self.assertGreater(
+            tail_frac, 0.05,
+            f"Colas insuficientes: fracción fuera de ±2.5σ_IQR={tail_frac:.3f} ≤ 5% "
+            f"(Gaussiano puro daría ~1.2%; mezcla con t-Student debería dar ≥10%)",
+        )
+
+    def test_sigma_scales_quadratic_with_depth(self):
+        """σ axial a 4.6m / σ axial a 3.5m ≈ (4.6/3.5)² ≈ 1.73 (±30%)."""
+        rng = np.random.default_rng(7)
+        results = {}
+        for depth in (3.5, 4.6):
+            pts, look = self._flat_surface_at_depth(depth, n=30_000, seed=int(depth * 10))
+            noise = compute_axial_noise(pts, CFG["cameras"], CFG, rng)
+            axial = (noise.astype(np.float64) * look).sum(axis=1)
+            results[depth] = np.std(axial)
+
+        ratio = results[4.6] / max(results[3.5], 1e-9)
+        expected = (4.6 / 3.5) ** 2   # ≈ 1.73
+        self.assertGreater(ratio, expected * 0.70,
+                           f"Scaling demasiado bajo: ratio={ratio:.2f}, esperado≈{expected:.2f}")
+        self.assertLess(ratio, expected * 1.30,
+                        f"Scaling demasiado alto: ratio={ratio:.2f}, esperado≈{expected:.2f}")
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

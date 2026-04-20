@@ -59,13 +59,15 @@ DEFAULTS = {
     "flat_min_h":       float(CFG["flat_min_h"]),
     "flat_max_h":       float(CFG["flat_max_h"]),
     "p_person":         float(CFG["p_person"]),
+    "p_forklift":       float(CFG["p_forklift"]),
     "p_cylinder":       float(CFG["p_cylinder"]),
     "cyl_r":            (float(CFG["cyl_min_r"]), float(CFG["cyl_max_r"])),
     "cyl_h":            (float(CFG["cyl_min_h"]), float(CFG["cyl_max_h"])),
     "box_w":            (float(CFG["box_min_w"]), float(CFG["box_max_w"])),
     "box_d":            (float(CFG["box_min_d"]), float(CFG["box_max_d"])),
     "box_h":            (float(CFG["box_min_h"]), float(CFG["box_max_h"])),
-    "noise_std":        float(CFG["noise_std"]),
+    "noise_core_ref":   float(CFG["noise_core_ref"]),
+    "noise_tail_ref":   float(CFG["noise_tail_ref"]),
     "dropout_ratio":    float(CFG["dropout_ratio"]),
     "outlier_ratio":    float(CFG["outlier_ratio"]),
     "voxel_size":       float(CFG["voxel_size"]),
@@ -153,6 +155,15 @@ with st.sidebar:
             st.caption(f"✅ STL encontrado: `{_person_stl.name}` — se usará malla real.")
         else:
             st.caption("⚠️ `data/person.stl` no encontrado — se usará fallback cilindro+esfera.")
+        p_forklift = st.slider(
+            "Prob. carretilla elevadora (vs traspaleta)", 0.0, 1.0, step=0.05, key="p_forklift",
+            value=DEFAULTS["p_forklift"],
+        )
+        _fork_stl = SRC_DIR.parent / "data" / "carretilla.stl"
+        if _fork_stl.exists():
+            st.caption(f"✅ STL encontrado: `{_fork_stl.name}` — carretilla disponible.")
+        else:
+            st.caption("⚠️ `data/carretilla.stl` no encontrado — p_forklift se ignorará.")
         p_cylinder = st.slider(
             "Prob. cilindro (en vez de caja)", 0.0, 1.0, step=0.05, key="p_cylinder",
             value=DEFAULTS["p_cylinder"],
@@ -186,9 +197,13 @@ with st.sidebar:
 
     # ── Ruido del sensor ───────────────────────────────────────────────────────
     with st.expander("📡 Ruido del sensor", expanded=False):
-        noise_std = st.slider(
-            "Ruido gaussiano σ (m)", 0.005, 0.100, step=0.001,
-            format="%.3f", key="noise_std", value=DEFAULTS["noise_std"],
+        noise_core_ref = st.slider(
+            "σ núcleo @ 3m (m)", 0.005, 0.030, step=0.001,
+            format="%.3f", key="noise_core_ref", value=DEFAULTS["noise_core_ref"],
+        )
+        noise_tail_ref = st.slider(
+            "σ cola @ 3m (m)", 0.010, 0.060, step=0.005,
+            format="%.3f", key="noise_tail_ref", value=DEFAULTS["noise_tail_ref"],
         )
         dropout_ratio = st.slider(
             "Dropout de puntos", 0.00, 0.60, step=0.01,
@@ -225,7 +240,7 @@ cfg.update({
     "flat_min_h":        flat_min_h,
     "flat_max_h":        flat_max_h,
     "p_person":          p_person,
-    "p_forklift":        0.0,
+    "p_forklift":        p_forklift,
     "p_cylinder":        p_cylinder,
     "cyl_min_r":         cyl_r[0],
     "cyl_max_r":         cyl_r[1],
@@ -237,7 +252,8 @@ cfg.update({
     "box_max_d":         box_d[1],
     "box_min_h":         box_h[0],
     "box_max_h":         box_h[1],
-    "noise_std":         noise_std,
+    "noise_core_ref":    noise_core_ref,
+    "noise_tail_ref":    noise_tail_ref,
     "dropout_ratio":     dropout_ratio,
     "outlier_ratio":     outlier_ratio,
     "voxel_size":        voxel_size,
@@ -259,7 +275,7 @@ with col_gen:
         f"suelo={'sí' if enable_floor else 'no'} · "
         f"pallet={p_pallet:.0%} · "
         f"voxel={voxel_size*100:.1f} cm · "
-        f"ruido={noise_std*100:.1f} cm"
+        f"core={noise_core_ref*100:.1f}cm tail={noise_tail_ref*100:.1f}cm"
     )
 
     if st.button("▶ Generar dataset", type="primary", use_container_width=True):

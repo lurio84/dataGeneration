@@ -36,8 +36,14 @@ CFG = {
     "seed":        42,
     "output_dir":  "../output/dataset",
 
-    # ── Sensor noise (FUSION3D: σ flat=6.5mm, overall≈30mm measured) ──
-    "noise_std":        0.035,   # m  Gaussian noise per point (calibrated to real roughness σ≈30mm)
+    # ── Sensor noise (FUSION3D BBB empirical calibration) ──
+    # Non-Gaussian mixture + quadratic depth scaling + axial ray projection.
+    # Targets: frontal 3.5m σ≈10/16mm; 42° tilt 4.3m σ≈27mm; 4.6m σ≈41mm.
+    "noise_gaussian_frac": 0.60,   # fraction using Gaussian core
+    "noise_core_ref":      0.010,  # m  σ_core at z_ref=3m
+    "noise_tail_ref":      0.025,  # m  σ_tail (t-Student) at z_ref=3m
+    "noise_tail_df":       4,      # degrees of freedom for t-distribution
+    "noise_z_ref":         3.0,    # m  reference depth for quadratic scaling
     "dropout_ratio":    0.15,    # fraction of points removed
     "outlier_ratio":    0.03,    # fraction turned into local outliers
     "voxel_size":       0.019,   # m  voxel grid; calibrated to real NN spacing ~55mm (was 10mm)
@@ -108,7 +114,7 @@ from geometry.meshes import (
     FORKLIFT_FORK_H, FORKLIFT_FORK_L, FORKLIFT_BODY_D, FORKLIFT_X_HALF,
     make_pallet_mesh, make_box_mesh, make_cylinder_mesh,
     make_primitive_mesh, make_person_mesh, make_pallet_jack_mesh,
-    load_forklift, load_carretilla,
+    load_carretilla,
 )
 from geometry.composition import (
     _spec_w, _spec_d, sample_cargo_spec, compose_cargo, compose_cargo_on_vehicle,
@@ -125,7 +131,7 @@ __all__ = [
     "EUR_W", "EUR_H", "EUR_D",
     "make_pallet_mesh", "make_box_mesh", "make_cylinder_mesh",
     "make_primitive_mesh", "make_person_mesh", "make_pallet_jack_mesh",
-    "load_forklift", "load_carretilla",
+    "load_carretilla",
     "_spec_w", "_spec_d", "sample_cargo_spec", "compose_cargo", "compose_cargo_on_vehicle",
     "sample_labeled", "sample_floor",
     "camera_arc_filter", "apply_distance_density", "degrade_labeled",
@@ -409,7 +415,8 @@ def parse_args(cfg: dict) -> dict:
     p.add_argument("--seed",       type=int,   default=cfg["seed"],        help="Random seed       (default: %(default)s)")
     p.add_argument("--out",        type=str,   default=cfg["output_dir"],  help="Output directory  (default: %(default)s)")
     # Sensor noise
-    p.add_argument("--noise",      type=float, default=cfg["noise_std"],         help="Gaussian noise σ in metres  (default: %(default)s)")
+    p.add_argument("--noise-core-ref", type=float, default=cfg["noise_core_ref"], metavar="M", help="σ_core @ z_ref=3m for Gaussian mixture component (default: %(default)s)")
+    p.add_argument("--noise-tail-ref", type=float, default=cfg["noise_tail_ref"], metavar="M", help="σ_tail @ z_ref=3m for t-Student component       (default: %(default)s)")
     p.add_argument("--dropout",    type=float, default=cfg["dropout_ratio"],     help="Point dropout ratio 0-1     (default: %(default)s)")
     p.add_argument("--voxel",      type=float, default=cfg["voxel_size"],        help="Voxel grid size in metres   (default: %(default)s)")
     p.add_argument("--outliers",   type=float, default=cfg["outlier_ratio"],     help="Outlier ratio 0-1           (default: %(default)s)")
@@ -444,8 +451,9 @@ def parse_args(cfg: dict) -> dict:
     cfg["n_samples"]      = args.n
     cfg["seed"]           = args.seed
     cfg["output_dir"]     = args.out
-    cfg["noise_std"]      = args.noise
-    cfg["dropout_ratio"]  = args.dropout
+    cfg["noise_core_ref"]  = args.noise_core_ref
+    cfg["noise_tail_ref"]  = args.noise_tail_ref
+    cfg["dropout_ratio"]   = args.dropout
     cfg["voxel_size"]     = args.voxel
     cfg["outlier_ratio"]  = args.outliers
     cfg["p_multi_cargo"]  = args.p_multi_cargo
@@ -534,7 +542,8 @@ def main() -> None:
             log.info("STL no encontrado (%s); p_forklift=0 → siempre traspaleta", _stl_p)
 
     log.info("Generating %d scenes → %s", cfg['n_samples'], cfg['output_dir'])
-    log.info("  noise=%.3fm  dropout=%.2f  voxel=%.3fm", cfg['noise_std'], cfg['dropout_ratio'], cfg['voxel_size'])
+    log.info("  noise_core=%.3fm  noise_tail=%.3fm  dropout=%.2f  voxel=%.3fm",
+             cfg['noise_core_ref'], cfg['noise_tail_ref'], cfg['dropout_ratio'], cfg['voxel_size'])
     log.info("  floor=%s  p_pallet=%.2f  p_person=%.2f  p_multi_cargo=%.2f",
              cfg.get('enable_floor', True), cfg['p_pallet'], cfg['p_person'], cfg['p_multi_cargo'])
 
