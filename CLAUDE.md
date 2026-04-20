@@ -34,7 +34,8 @@ v = np.asarray(m.vertices); e = v.max(0)-v.min(0)
 print(f'extent {e}  min {v.min(0)}  max {v.max(0)}')"
 
 # Entrenar clasificador (lanzar en background — tarda ~15 min)
-cd src && python3 -u classifier/train.py --out ../models --cv-estimators 100 --cv-subsample 0.3 --n-jobs -1
+# Flags recomendados: --lgbm-only-cv ahorra 5-10x tiempo de CV; --skip-rf-retrain para solo guardar LGBM
+cd src && python3 -u classifier/train.py --out ../models --cv-estimators 100 --cv-subsample 0.3 --lgbm-only-cv --n-jobs -1
 
 # Predecir sobre PLY real
 cd src && python3 classifier/predict.py <input.ply> <output.ply>
@@ -58,15 +59,31 @@ src/
 │   └── composition.py       # sample_cargo_spec, compose_cargo (normal/stacked/tandem)
 │                            # compose_cargo_on_vehicle(spec, rng, *, fork_h, fork_l)
 ├── sensor/noise.py          # sample_labeled, sample_floor, camera_arc_filter, degrade_labeled
+│                            # compute_axial_noise: mezcla Gaussiana+t-Student, σ cuadrático en Z
 ├── utils/preview_grid.py    # render_scene, load_synth (importado por app.py y test_pipeline.py)
 ├── utils/view_png.py        # standalone, visualización local
 ├── classifier/
-│   ├── features.py          # K_NEIGHBORS=20, LOCAL_RADIUS_M=0.15, extract_features()
+│   ├── features.py          # 19 features, K_NEIGHBORS=20, LOCAL_RADIUS_M=0.15, extract_features()
 │   ├── train.py             # RF + LightGBM, CV StratifiedGroupKFold, guarda en models/
-│   ├── predict.py           # inferencia PLY → PLY etiquetado
+│   │                        # Flags útiles: --lgbm-only-cv, --skip-rf-retrain, --max-samples-rf
+│   ├── predict.py           # inferencia PLY → PLY etiquetado (--align auto|fusion3d|none)
 │   └── evaluate.py          # confusion matrix + feature importance → output/classifier_eval/
-├── test_pipeline.py         # 93 tests de generación de datos  \
-├── test_classifier.py       # 8 tests del clasificador          / → 101 total
+├── cargo_geometric/         # Pipeline extracción de cargo en datos BBB reales
+│   ├── params.py            # GeometricParams dataclass — fuente única de verdad
+│   ├── floor.py             # RANSAC floor removal + synthetic_floor() fallback
+│   ├── anchor.py            # DBSCAN 2D para detectar bulto de cargo
+│   ├── cargo.py             # Extracción con filtro negativo ML
+│   ├── cluster_features.py  # 23 features a nivel de cluster
+│   ├── cluster_classifier.py# Carga e inferencia del clasificador de clusters
+│   ├── cluster_gt.py        # Ground truth de clusters (debug)
+│   ├── pallet.py            # Detección de palet EUR
+│   └── volume.py            # Estimación de volumen 2.5D height-field
+├── test_pipeline.py         # ~118 tests de generación de datos (incl. floor, labels, tandem)
+├── test_classifier.py       # 8 tests del clasificador
+├── test_cluster_features.py # Tests de cluster_features.py
+├── test_cluster_gt.py       # Tests de cluster_gt.py
+├── test_cluster_classifier.py
+├── test_cargo_classifier_integration.py
 ├── app.py                   # Streamlit UI (streamlit run app.py desde src/)
 └── analyze.py               # comparación sintético vs real FUSION3D
 ```

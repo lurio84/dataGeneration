@@ -229,9 +229,13 @@ Documento vivo. Se actualiza a medida que se toman decisiones.
   - `src/test_classifier.py` — 8 tests pytest (todos passing)
   - `models/` — directorio versionado; `.pkl` gitignoreados (demasiado grandes)
 
-### Features (16 per-point) — post-rediseño 2026-04-13
+### Features — histórico de cambios
 
-**Eliminadas** (causaban predicción posicional en anillo — validado visualmente en 6 escenas BBB):
+> **⚠️ Esta tabla refleja el estado en 2026-04-13 (16 features). La lista actual es de 19 features.**
+> El conjunto se amplió en §15 (eliminación de `z`, añadidos `height_above_local_floor`, `linearity_large`, `sphericity_large`, `verticality_large`).
+> Ver `src/classifier/features.py::FEATURE_NAMES` para el estado canónico actual.
+
+**Eliminadas en 2026-04-13** (causaban predicción posicional en anillo — validado visualmente en 6 escenas BBB):
 - `dist_xz` — distancia radial XZ al origen → vehicle/person clasificados por posición, no forma
 - `dist_centroid_xz` — distancia XZ al centroide de escena → mismo efecto
 
@@ -327,7 +331,9 @@ Retrain full dataset (6.25M pts): RF 300 trees → 1864s, LGBM → 72s. Tamaños
 
 ## 12. Experimento no-floor — entrenamiento sin clase suelo
 
-**Estado: 🔴 Decisión pendiente (2026-04-13)**
+**Estado: ✅ Decidido — Opción A (with_floor), experimento descartado (2026-04-13)**
+
+> Nota: el Estado era 🔴 en el momento de escribir este experimento, pero la decisión se cerró en el mismo commit. Ver §13 para el bench que confirmó Opción A.
 
 **Motivación:** floor representa ~77% de los puntos en el dataset (label=0). Es la clase más fácil de separar (Y bajo, planarity=1, normal_y≈1). Hipótesis: excluirlo del training podría mejorar F1 en clases difíciles (vehicle, pallet) y reducir tiempo de entrenamiento ~4×.
 
